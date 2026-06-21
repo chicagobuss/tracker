@@ -1,0 +1,23 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: coord-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PGUSER:-coord}
+      POSTGRES_PASSWORD: ${PGPASSWORD:-coord}
+      POSTGRES_DB: ${PGDATABASE:-coord}
+    # Bind to ZeroTier + localhost only (never the public/LAN interface by default).
+    ports:
+      - "127.0.0.1:5432:5432"
+      - "10.10.10.10:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PGUSER:-coord} -d ${PGDATABASE:-coord}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
