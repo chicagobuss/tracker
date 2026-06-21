@@ -1,3 +1,7 @@
+# Pinned project name so the stack is recognized regardless of directory
+# (matches the existing coord-postgres container + coord_pgdata volume).
+name: coord
+
 services:
   postgres:
     image: pgvector/pgvector:pg17
