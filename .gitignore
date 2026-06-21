@@ -2,6 +2,8 @@
 .env.*
 !.env.example
 pgdata/
-tracker
-trackerd
+# compiled binary at repo root only (anchored, so skills/tracker/ isn't ignored)
+/tracker
+/trackerd
 *.log
+.serena/
