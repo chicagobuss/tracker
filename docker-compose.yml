@@ -19,5 +19,18 @@ services:
       timeout: 3s
       retries: 10
 
+  tracker:
+    build: .
+    image: tracker:local
+    container_name: coord-tracker
+    restart: unless-stopped
+    # Host networking: binds the same loopback/LAN/ZeroTier IPs as before and
+    # reaches Postgres (127.0.0.1:5432) and RustFS (192.168.1.100:9000) on the host.
+    network_mode: host
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   pgdata:

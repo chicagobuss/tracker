@@ -1,0 +1,7 @@
+.git
+pgdata/
+tracker
+trackerd
+*.log
+.env
+.env.*

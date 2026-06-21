@@ -27,12 +27,24 @@ knowledge-app problem — so: Postgres + S3, not Anytype.
 
 ## Run
 
+Both Postgres and the service run via Docker Compose (no sudo needed). The
+`tracker` container uses host networking, so it binds the loopback/LAN/ZeroTier
+IPs in `LISTEN_ADDR` and reaches Postgres + RustFS on the host.
+
 ```bash
-cp .env.example .env        # fill in secrets + set API_TOKENS before exposing
-docker compose up -d        # pgvector Postgres
-go build -o tracker .
-set -a && . ./.env && set +a && ./tracker
+cp .env.example .env          # fill in secrets + set API_TOKENS before exposing
+docker compose up -d          # starts pgvector Postgres + tracker
 ```
+
+Ops:
+
+```bash
+docker compose up -d --build tracker   # rebuild + restart after code changes
+docker compose logs -f tracker         # logs
+docker compose restart tracker         # restart
+```
+
+For local dev without a container: `go build -o tracker . && set -a && . ./.env && set +a && ./tracker`.
 
 ## API
 
