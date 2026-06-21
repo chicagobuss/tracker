@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -39,9 +40,10 @@ type Document struct {
 	ContentKey  string    `json:"content_key,omitempty"`
 	ContentHash string    `json:"content_hash,omitempty"`
 	ContentType string    `json:"content_type"`
-	SizeBytes   int64     `json:"size_bytes"`
-	Tags        []string  `json:"tags"`
-	Version     int       `json:"version"`
+	SizeBytes   int64           `json:"size_bytes"`
+	Tags        []string        `json:"tags"`
+	Metadata    json.RawMessage `json:"metadata"`
+	Version     int             `json:"version"`
 	CreatedBy   string    `json:"created_by,omitempty"`
 	UpdatedBy   string    `json:"updated_by,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
@@ -117,13 +119,13 @@ func (s *Store) migrate(ctx context.Context) error {
 
 // docSelect is the column list shared by single/list reads.
 const docSelect = `id, slug, title, kind, coalesce(content_key,''), coalesce(content_hash,''),
-	content_type, size_bytes, tags, version, coalesce(created_by,''), coalesce(updated_by,''),
+	content_type, size_bytes, tags, metadata, version, coalesce(created_by,''), coalesce(updated_by,''),
 	created_at, updated_at`
 
 func scanDoc(row pgx.Row) (*Document, error) {
 	var d Document
 	err := row.Scan(&d.ID, &d.Slug, &d.Title, &d.Kind, &d.ContentKey, &d.ContentHash,
-		&d.ContentType, &d.SizeBytes, &d.Tags, &d.Version, &d.CreatedBy, &d.UpdatedBy,
+		&d.ContentType, &d.SizeBytes, &d.Tags, &d.Metadata, &d.Version, &d.CreatedBy, &d.UpdatedBy,
 		&d.CreatedAt, &d.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
@@ -131,22 +133,73 @@ func scanDoc(row pgx.Row) (*Document, error) {
 	return &d, err
 }
 
-func (s *Store) CreateDocument(ctx context.Context, slug, title, kind string, tags []string, by string) (*Document, error) {
+// CreateDocument inserts a new document. metadata (jsonb, may be nil) holds
+// caller-defined fields (e.g. a folio's description/source). If content is
+// non-nil it is seeded as version 1 — safe without a lease since a brand-new
+// document has no concurrent writer to conflict with.
+func (s *Store) CreateDocument(ctx context.Context, slug, title, kind string, tags []string, metadata json.RawMessage, content []byte, contentType, by string) (*Document, error) {
 	if kind == "" {
 		kind = "note"
 	}
 	if tags == nil {
 		tags = []string{}
 	}
-	row := s.db.QueryRow(ctx, `
-		insert into documents (slug, title, kind, tags, created_by, updated_by)
-		values ($1, $2, $3, $4, $5, $5)
-		returning `+docSelect, slug, title, kind, tags, by)
-	doc, err := scanDoc(row)
-	if err == nil {
-		s.touchActor(ctx, by)
+	if len(metadata) == 0 {
+		metadata = json.RawMessage(`{}`)
 	}
-	return doc, err
+	if contentType == "" {
+		contentType = "text/markdown"
+	}
+
+	if content == nil {
+		row := s.db.QueryRow(ctx, `
+			insert into documents (slug, title, kind, tags, metadata, created_by, updated_by)
+			values ($1, $2, $3, $4, $5::jsonb, $6, $6)
+			returning `+docSelect, slug, title, kind, tags, string(metadata), by)
+		doc, err := scanDoc(row)
+		if err == nil {
+			s.touchActor(ctx, by)
+		}
+		return doc, err
+	}
+
+	// Seed initial content: blob first (content-addressed), then the row + v1 revision.
+	sum := sha256.Sum256(content)
+	hash := hex.EncodeToString(sum[:])
+	key := "sha256/" + hash
+	if _, err := s.s3.PutObject(ctx, s.bucket, key, bytes.NewReader(content), int64(len(content)),
+		minio.PutObjectOptions{ContentType: contentType}); err != nil {
+		return nil, fmt.Errorf("put blob: %w", err)
+	}
+
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	row := tx.QueryRow(ctx, `
+		insert into documents (slug, title, kind, tags, metadata, content_key, content_hash,
+			content_type, size_bytes, version, created_by, updated_by,
+			fts)
+		values ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, 1, $10, $10,
+			to_tsvector('english', $2 || ' ' || left($11, 100000)))
+		returning `+docSelect, slug, title, kind, tags, string(metadata), key, hash,
+		contentType, int64(len(content)), by, string(content))
+	doc, err := scanDoc(row)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `
+		insert into document_revisions (document_id, version, content_key, content_hash, size_bytes, author)
+		values ($1, 1, $2, $3, $4, $5)`, doc.ID, key, hash, int64(len(content)), by); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	s.touchActor(ctx, by)
+	return doc, nil
 }
 
 // idClause matches either a UUID id or a slug, so callers can use whichever.

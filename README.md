@@ -39,7 +39,7 @@ set -a && . ./.env && set +a && ./tracker
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/healthz` | health check |
-| POST | `/docs` | create doc (`{slug,title,kind,tags}`) |
+| POST | `/docs` | create doc (`{slug,title,kind,tags,metadata,content,content_type}`; `content` seeds v1) |
 | GET | `/docs` | list/search (`?q=&kind=&tag=`) |
 | GET | `/docs/{id}` | metadata + presigned `content_url` + live `locked_by` |
 | PUT | `/docs/{id}` | write content; headers `X-Lease-Token`, `If-Match: <version>` |
@@ -51,6 +51,17 @@ set -a && . ./.env && set +a && ./tracker
 | POST | `/tasks/{id}/complete` | finish (`{status,result}`) |
 | GET | `/actors` | registry of entities with `first_seen`/`last_seen`/`action_count` |
 | GET | `/actors/{name}/activity` | that entity's recent doc writes (`?limit=`) |
+| GET | `/folios` | list folios (collections; `kind=folio` documents) |
+| GET | `/folios/{slug}` | a folio document + its member files |
+
+### Folios
+
+A **folio** is a little collection of related documents (think: a GitHub gist).
+It's modelled tableless: the folio is itself a document with `kind='folio'`
+whose `metadata` holds `{description, public, github_id, ...}`; its files are
+documents tagged `folio:<slug>` with slug `<folio-slug>/<filename>`. So a folio
+file inherits everything (versioning, leases, attribution, search). Import your
+recent gists with `scripts/import_gists.py` (uses the `gh` CLI).
 
 `{id}` accepts either the UUID or the slug.
 

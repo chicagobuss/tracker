@@ -76,21 +76,56 @@ func (s *Server) createDoc(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		Slug  string   `json:"slug"`
-		Title string   `json:"title"`
-		Kind  string   `json:"kind"`
-		Tags  []string `json:"tags"`
+		Slug        string          `json:"slug"`
+		Title       string          `json:"title"`
+		Kind        string          `json:"kind"`
+		Tags        []string        `json:"tags"`
+		Metadata    json.RawMessage `json:"metadata"`
+		Content     string          `json:"content"`      // optional initial content
+		ContentType string          `json:"content_type"` // defaults to text/markdown
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Slug == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "json body with non-empty 'slug' required"})
 		return
 	}
-	doc, err := s.store.CreateDocument(r.Context(), in.Slug, in.Title, in.Kind, in.Tags, actor)
+	var content []byte
+	if in.Content != "" {
+		content = []byte(in.Content)
+	}
+	doc, err := s.store.CreateDocument(r.Context(), in.Slug, in.Title, in.Kind, in.Tags, in.Metadata, content, in.ContentType, actor)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, doc)
+}
+
+// --- folios (collections of documents grouped by a folio:<slug> tag) ---
+
+func folioTag(slug string) string { return "folio:" + slug }
+
+func (s *Server) listFolios(w http.ResponseWriter, r *http.Request) {
+	folios, err := s.store.ListDocuments(r.Context(), "", "folio", "")
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"folios": folios})
+}
+
+func (s *Server) getFolio(w http.ResponseWriter, r *http.Request) {
+	slug := r.PathValue("slug")
+	folio, err := s.store.GetDocument(r.Context(), slug)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	files, err := s.store.ListDocuments(r.Context(), "", "", folioTag(folio.Slug))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"folio": folio, "files": files})
 }
 
 func (s *Server) listDocs(w http.ResponseWriter, r *http.Request) {

@@ -46,6 +46,9 @@ func main() {
 	mux.HandleFunc("GET /actors", srv.auth(srv.listActors))
 	mux.HandleFunc("GET /actors/{name}/activity", srv.auth(srv.actorActivity))
 
+	mux.HandleFunc("GET /folios", srv.auth(srv.listFolios))
+	mux.HandleFunc("GET /folios/{slug}", srv.auth(srv.getFolio))
+
 	// Web UI (unauthenticated static assets; data fetches carry the bearer token).
 	webRoot, _ := fs.Sub(webFS, "web")
 	mux.Handle("GET /static/", http.FileServerFS(webRoot))
