@@ -9,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/url"
+	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -96,12 +98,19 @@ func openStore(ctx context.Context, cfg Config) (*Store, error) {
 }
 
 func (s *Store) migrate(ctx context.Context) error {
-	sql, err := migrationsFS.ReadFile("migrations/0001_init.sql")
+	files, err := fs.Glob(migrationsFS, "migrations/*.sql")
 	if err != nil {
 		return err
 	}
-	if _, err := s.db.Exec(ctx, string(sql)); err != nil {
-		return fmt.Errorf("apply schema: %w", err)
+	sort.Strings(files) // 0001_, 0002_, ... applied in order; each is idempotent
+	for _, f := range files {
+		sql, err := migrationsFS.ReadFile(f)
+		if err != nil {
+			return err
+		}
+		if _, err := s.db.Exec(ctx, string(sql)); err != nil {
+			return fmt.Errorf("apply %s: %w", f, err)
+		}
 	}
 	return nil
 }
@@ -133,7 +142,11 @@ func (s *Store) CreateDocument(ctx context.Context, slug, title, kind string, ta
 		insert into documents (slug, title, kind, tags, created_by, updated_by)
 		values ($1, $2, $3, $4, $5, $5)
 		returning `+docSelect, slug, title, kind, tags, by)
-	return scanDoc(row)
+	doc, err := scanDoc(row)
+	if err == nil {
+		s.touchActor(ctx, by)
+	}
+	return doc, err
 }
 
 // idClause matches either a UUID id or a slug, so callers can use whichever.
@@ -230,6 +243,7 @@ func (s *Store) AcquireLease(ctx context.Context, docID, owner, reason string, t
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
+	s.touchActor(ctx, owner)
 	return &cur, nil
 }
 
@@ -296,11 +310,11 @@ func (s *Store) WriteContent(ctx context.Context, docID, owner, leaseToken strin
 		return nil, err
 	}
 
-	// Require a live lease owned by the caller.
-	var lockTok string
+	// Require a live lease, held by THIS actor, with a matching token.
+	var lockTok, lockOwner string
 	var exp time.Time
-	err = tx.QueryRow(ctx, `select lease_token::text, expires_at from doc_locks where document_id = $1`, id).Scan(&lockTok, &exp)
-	if errors.Is(err, pgx.ErrNoRows) || exp.Before(time.Now()) || lockTok != leaseToken || leaseToken == "" {
+	err = tx.QueryRow(ctx, `select lease_token::text, owner, expires_at from doc_locks where document_id = $1`, id).Scan(&lockTok, &lockOwner, &exp)
+	if errors.Is(err, pgx.ErrNoRows) || exp.Before(time.Now()) || lockTok != leaseToken || leaseToken == "" || lockOwner != owner {
 		return nil, ErrNoLease
 	} else if err != nil {
 		return nil, err
@@ -331,6 +345,7 @@ func (s *Store) WriteContent(ctx context.Context, docID, owner, leaseToken strin
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
+	s.touchActor(ctx, owner)
 	return doc, nil
 }
 
@@ -348,4 +363,73 @@ func (s *Store) PresignGet(ctx context.Context, contentKey string, ttl time.Dura
 		return "", err
 	}
 	return u.String(), nil
+}
+
+// --- actors (entity registry) ---
+
+type Actor struct {
+	Name        string    `json:"name"`
+	FirstSeen   time.Time `json:"first_seen"`
+	LastSeen    time.Time `json:"last_seen"`
+	ActionCount int64     `json:"action_count"`
+}
+
+// touchActor records an entity's activity. Best-effort metadata: errors are
+// swallowed so attribution bookkeeping never fails the underlying operation.
+func (s *Store) touchActor(ctx context.Context, name string) {
+	if name == "" {
+		return
+	}
+	_, _ = s.db.Exec(ctx, `
+		insert into actors (name, action_count) values ($1, 1)
+		on conflict (name) do update set last_seen = now(), action_count = actors.action_count + 1`, name)
+}
+
+func (s *Store) ListActors(ctx context.Context) ([]Actor, error) {
+	rows, err := s.db.Query(ctx, `select name, first_seen, last_seen, action_count from actors order by last_seen desc`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Actor{}
+	for rows.Next() {
+		var a Actor
+		if err := rows.Scan(&a.Name, &a.FirstSeen, &a.LastSeen, &a.ActionCount); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// ActivityItem is one change made by an actor (derived from document_revisions).
+type ActivityItem struct {
+	DocumentID string    `json:"document_id"`
+	Slug       string    `json:"slug"`
+	Title      string    `json:"title"`
+	Version    int       `json:"version"`
+	SizeBytes  int64     `json:"size_bytes"`
+	At         time.Time `json:"at"`
+}
+
+// ActorActivity returns an entity's most recent document writes — the real
+// "last changes by entity", read straight from the immutable revision log.
+func (s *Store) ActorActivity(ctx context.Context, name string, limit int) ([]ActivityItem, error) {
+	rows, err := s.db.Query(ctx, `
+		select r.document_id, d.slug, d.title, r.version, r.size_bytes, r.created_at
+		from document_revisions r join documents d on d.id = r.document_id
+		where r.author = $1 order by r.created_at desc limit $2`, name, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []ActivityItem{}
+	for rows.Next() {
+		var a ActivityItem
+		if err := rows.Scan(&a.DocumentID, &a.Slug, &a.Title, &a.Version, &a.SizeBytes, &a.At); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
 }

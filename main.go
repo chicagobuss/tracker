@@ -43,6 +43,9 @@ func main() {
 	mux.HandleFunc("POST /tasks/claim", srv.auth(srv.claimTask))
 	mux.HandleFunc("POST /tasks/{id}/complete", srv.auth(srv.completeTask))
 
+	mux.HandleFunc("GET /actors", srv.auth(srv.listActors))
+	mux.HandleFunc("GET /actors/{name}/activity", srv.auth(srv.actorActivity))
+
 	// Web UI (unauthenticated static assets; data fetches carry the bearer token).
 	webRoot, _ := fs.Sub(webFS, "web")
 	mux.Handle("GET /static/", http.FileServerFS(webRoot))

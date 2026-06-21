@@ -42,16 +42,29 @@ set -a && . ./.env && set +a && ./tracker
 | POST | `/docs` | create doc (`{slug,title,kind,tags}`) |
 | GET | `/docs` | list/search (`?q=&kind=&tag=`) |
 | GET | `/docs/{id}` | metadata + presigned `content_url` + live `locked_by` |
-| PUT | `/docs/{id}` | write content; headers `X-Owner`, `X-Lease-Token`, `If-Match: <version>` |
-| POST | `/docs/{id}/lock` | acquire/renew lease (`{owner,ttl_seconds,reason,lease_token}`); `409` if held |
+| PUT | `/docs/{id}` | write content; headers `X-Lease-Token`, `If-Match: <version>` |
+| POST | `/docs/{id}/lock` | acquire/renew lease (`{ttl_seconds,reason,lease_token}`); `409` if held |
 | GET | `/docs/{id}/lock` | is it locked, by whom |
 | DELETE | `/docs/{id}/lock` | release (header `X-Lease-Token`) |
-| POST | `/tasks` | enqueue task |
-| POST | `/tasks/claim` | atomically claim next open task (`{worker}`); `204` if empty |
+| POST | `/tasks` | enqueue task (`{title,payload}`) |
+| POST | `/tasks/claim` | atomically claim next open task; `204` if empty |
 | POST | `/tasks/{id}/complete` | finish (`{status,result}`) |
+| GET | `/actors` | registry of entities with `first_seen`/`last_seen`/`action_count` |
+| GET | `/actors/{name}/activity` | that entity's recent doc writes (`?limit=`) |
 
-`{id}` accepts either the UUID or the slug. Auth: `Authorization: Bearer <token>`
-when `API_TOKENS` is set.
+`{id}` accepts either the UUID or the slug.
+
+### Acting entity
+
+Every **mutating** request must send an `X-Actor: <name>` header naming the
+entity performing it (missing → `400`). That value is stamped into
+`created_by`/`updated_by`, the revision `author`, the lease `owner`, and task
+`claimed_by`, and upserted into the `actors` registry. A write must come from
+the entity that **holds the lease** (actor ≠ lease owner → `423`).
+
+On a trusted (non-internet) network `X-Actor` is self-asserted attribution, not
+authenticated identity. Set `API_TOKENS` and bind actor→token if you need it to
+be tamper-proof.
 
 ## Status
 

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -55,21 +56,36 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// actor returns the entity performing a mutating request, from the required
+// X-Actor header. On a missing/blank value it writes a 400 and returns false,
+// so attribution is never anonymous.
+func (s *Server) actor(w http.ResponseWriter, r *http.Request) (string, bool) {
+	a := strings.TrimSpace(r.Header.Get("X-Actor"))
+	if a == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "X-Actor header required (the entity performing this action)"})
+		return "", false
+	}
+	return a, true
+}
+
 // --- documents ---
 
 func (s *Server) createDoc(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.actor(w, r)
+	if !ok {
+		return
+	}
 	var in struct {
 		Slug  string   `json:"slug"`
 		Title string   `json:"title"`
 		Kind  string   `json:"kind"`
 		Tags  []string `json:"tags"`
-		By    string   `json:"by"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Slug == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "json body with non-empty 'slug' required"})
 		return
 	}
-	doc, err := s.store.CreateDocument(r.Context(), in.Slug, in.Title, in.Kind, in.Tags, in.By)
+	doc, err := s.store.CreateDocument(r.Context(), in.Slug, in.Title, in.Kind, in.Tags, actor)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -112,11 +128,14 @@ func (s *Server) getDoc(w http.ResponseWriter, r *http.Request) {
 
 // putDoc writes content. Requires headers:
 //
-//	X-Owner:       agent id (must match lease owner)
+//	X-Actor:       the entity writing (must hold the lease)
 //	X-Lease-Token: the lease token from POST /docs/{id}/lock
 //	If-Match:      the document version you based this write on (optimistic CAS)
 func (s *Server) putDoc(w http.ResponseWriter, r *http.Request) {
-	owner := r.Header.Get("X-Owner")
+	owner, ok := s.actor(w, r)
+	if !ok {
+		return
+	}
 	token := r.Header.Get("X-Lease-Token")
 	baseVersion, err := strconv.Atoi(r.Header.Get("If-Match"))
 	if err != nil {
@@ -165,21 +184,21 @@ func (s *Server) rawDoc(w http.ResponseWriter, r *http.Request) {
 // --- locks (leases) ---
 
 func (s *Server) acquireLock(w http.ResponseWriter, r *http.Request) {
+	owner, ok := s.actor(w, r)
+	if !ok {
+		return
+	}
 	var in struct {
-		Owner      string `json:"owner"`
 		Reason     string `json:"reason"`
 		TTLSeconds int    `json:"ttl_seconds"`
 		LeaseToken string `json:"lease_token"` // present => renew
 	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Owner == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "json body with non-empty 'owner' required"})
-		return
-	}
+	_ = json.NewDecoder(r.Body).Decode(&in)
 	ttl := time.Duration(in.TTLSeconds) * time.Second
 	if ttl <= 0 {
 		ttl = 60 * time.Second
 	}
-	lease, err := s.store.AcquireLease(r.Context(), r.PathValue("id"), in.Owner, in.Reason, ttl, in.LeaseToken)
+	lease, err := s.store.AcquireLease(r.Context(), r.PathValue("id"), owner, in.Reason, ttl, in.LeaseToken)
 	if errors.Is(err, ErrLeaseHeld) {
 		writeJSON(w, http.StatusConflict, map[string]any{"error": "locked", "held_by": lease.Owner, "expires_at": lease.ExpiresAt})
 		return
@@ -220,12 +239,16 @@ func (s *Server) releaseLock(w http.ResponseWriter, r *http.Request) {
 // --- tasks ---
 
 func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.actor(w, r)
+	if !ok {
+		return
+	}
 	var in struct {
 		Title   string          `json:"title"`
 		Payload json.RawMessage `json:"payload"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&in)
-	task, err := s.store.CreateTask(r.Context(), in.Title, in.Payload)
+	task, err := s.store.CreateTask(r.Context(), in.Title, in.Payload, actor)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -234,14 +257,11 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) claimTask(w http.ResponseWriter, r *http.Request) {
-	var in struct {
-		Worker string `json:"worker"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Worker == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "json body with non-empty 'worker' required"})
+	worker, ok := s.actor(w, r)
+	if !ok {
 		return
 	}
-	task, err := s.store.ClaimNextTask(r.Context(), in.Worker)
+	task, err := s.store.ClaimNextTask(r.Context(), worker)
 	if errors.Is(err, ErrNotFound) {
 		writeJSON(w, http.StatusNoContent, nil)
 		return
@@ -254,15 +274,43 @@ func (s *Server) claimTask(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) completeTask(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.actor(w, r)
+	if !ok {
+		return
+	}
 	var in struct {
 		Status string          `json:"status"`
 		Result json.RawMessage `json:"result"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&in)
-	task, err := s.store.CompleteTask(r.Context(), r.PathValue("id"), in.Status, in.Result)
+	task, err := s.store.CompleteTask(r.Context(), r.PathValue("id"), in.Status, in.Result, actor)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, task)
+}
+
+// --- actors ---
+
+func (s *Server) listActors(w http.ResponseWriter, r *http.Request) {
+	actors, err := s.store.ListActors(r.Context())
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"actors": actors})
+}
+
+func (s *Server) actorActivity(w http.ResponseWriter, r *http.Request) {
+	limit := 50
+	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 && n <= 500 {
+		limit = n
+	}
+	items, err := s.store.ActorActivity(r.Context(), r.PathValue("name"), limit)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"activity": items})
 }
