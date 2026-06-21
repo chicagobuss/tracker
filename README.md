@@ -5,6 +5,27 @@ index + lease/coordination state; content blobs live in RustFS (S3). Single
 static Go binary, low footprint, reachable by agents over the network
 (e.g. ZeroTier).
 
+## Agents: MCP server + skill
+
+`mcp/tracker_mcp.py` is an MCP server (a self-contained `uv` script — no install)
+that exposes tracker to any coding agent: `search_docs`, `list_folios`,
+`get_folio`, `read_doc`, `who_is_editing`, `create_doc`, `create_folio`,
+`update_doc` (acquires the lease, writes with the version check, and releases for
+you), `list_actors`, and the task tools. Configure per agent via env:
+`TRACKER_URL`, `TRACKER_ACTOR` (the agent's identity, stamped on writes),
+`TRACKER_TOKEN` (only if `API_TOKENS` is set).
+
+Register with Claude Code:
+
+```bash
+claude mcp add tracker --scope user \
+  --env TRACKER_URL=http://127.0.0.1:8080 --env TRACKER_ACTOR=claude-code \
+  -- uv run --quiet --script /path/to/tracker/mcp/tracker_mcp.py
+```
+
+`skills/tracker/SKILL.md` is the matching Claude Code skill (copy to
+`~/.claude/skills/tracker/`) describing when/how to consult tracker.
+
 ## Why
 
 Agents need a shared source of truth and a way to see **if a doc is already
