@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tracker</title>
+<script src="/static/marked.min.js"></script>
+<script src="/static/purify.min.js"></script>
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --border:#262b36; --fg:#d7dce5; --muted:#8a93a3; --accent:#6ea8fe; --lock:#e0a458; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; color:var(--fg); background:var(--bg); height:100vh; display:flex; flex-direction:column; }
+  header { display:flex; gap:.6rem; align-items:center; padding:.55rem .8rem; background:var(--panel); border-bottom:1px solid var(--border); }
+  header h1 { font-size:15px; margin:0 .5rem 0 0; font-weight:600; letter-spacing:.5px; }
+  header input { background:#0c0e12; border:1px solid var(--border); color:var(--fg); border-radius:6px; padding:.35rem .5rem; }
+  #q { flex:1; }
+  #token { width:170px; }
+  button { background:#222733; color:var(--fg); border:1px solid var(--border); border-radius:6px; padding:.35rem .6rem; cursor:pointer; }
+  button:hover { background:#2b3240; }
+  main { flex:1; display:flex; min-height:0; }
+  #list { width:300px; border-right:1px solid var(--border); overflow:auto; background:var(--panel); }
+  .item { padding:.5rem .7rem; border-bottom:1px solid var(--border); cursor:pointer; }
+  .item:hover { background:#1d2230; }
+  .item.active { background:#202739; border-left:2px solid var(--accent); }
+  .item .title { font-weight:600; }
+  .item .meta { color:var(--muted); font-size:12px; display:flex; gap:.4rem; align-items:center; flex-wrap:wrap; }
+  .badge { font-size:10.5px; padding:.05rem .35rem; border-radius:4px; border:1px solid var(--border); color:var(--muted); }
+  .lock { color:var(--lock); border-color:var(--lock); }
+  #view { flex:1; overflow:auto; padding:1.2rem 1.6rem; }
+  #docmeta { color:var(--muted); font-size:12px; margin-bottom:1rem; padding-bottom:.6rem; border-bottom:1px solid var(--border); display:flex; gap:.7rem; flex-wrap:wrap; }
+  .md h1,.md h2,.md h3 { line-height:1.25; }
+  .md pre { background:#0c0e12; border:1px solid var(--border); padding:.7rem; border-radius:6px; overflow:auto; }
+  .md code { background:#0c0e12; padding:.1rem .3rem; border-radius:4px; }
+  .md pre code { background:none; padding:0; }
+  .md table { border-collapse:collapse; } .md th,.md td { border:1px solid var(--border); padding:.3rem .5rem; }
+  .md blockquote { border-left:3px solid var(--border); margin:0; padding-left:.8rem; color:var(--muted); }
+  .empty { color:var(--muted); margin-top:3rem; text-align:center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>tracker</h1>
+  <input id="q" placeholder="search…" autocomplete="off">
+  <input id="token" placeholder="bearer token (if set)" autocomplete="off">
+  <button id="refresh">↻</button>
+</header>
+<main>
+  <div id="list"></div>
+  <div id="view"><div class="empty">Select a document.</div></div>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+const tokenBox = $("#token");
+tokenBox.value = localStorage.getItem("tracker_token") || "";
+tokenBox.addEventListener("change", () => localStorage.setItem("tracker_token", tokenBox.value.trim()));
+
+function headers() {
+  const t = tokenBox.value.trim();
+  return t ? { Authorization: "Bearer " + t } : {};
+}
+async function api(path) {
+  const r = await fetch(path, { headers: headers() });
+  if (!r.ok) throw new Error("HTTP " + r.status + " on " + path);
+  return r;
+}
+
+let active = null;
+async function loadList() {
+  const q = encodeURIComponent($("#q").value.trim());
+  const list = $("#list");
+  try {
+    const { documents } = await (await api("/docs?q=" + q)).json();
+    if (!documents.length) { list.innerHTML = '<div class="empty">No documents.</div>'; return; }
+    list.innerHTML = "";
+    for (const d of documents) {
+      const el = document.createElement("div");
+      el.className = "item" + (d.id === active ? " active" : "");
+      const tags = (d.tags || []).map(t => `<span class="badge">#${t}</span>`).join("");
+      el.innerHTML = `<div class="title">${esc(d.title || d.slug)}</div>
+        <div class="meta"><span class="badge">${esc(d.kind)}</span><span>v${d.version}</span><span>${esc(d.slug)}</span>${tags}</div>`;
+      el.onclick = () => openDoc(d.id);
+      list.appendChild(el);
+    }
+  } catch (e) { list.innerHTML = `<div class="empty">${esc(e.message)}<br><small>set a bearer token?</small></div>`; }
+}
+
+async function openDoc(id) {
+  active = id;
+  loadList();
+  const view = $("#view");
+  try {
+    const { document: d, locked_by, locked_until } = await (await api("/docs/" + id)).json();
+    let body = "";
+    if (d.content_key) {
+      const raw = await (await api("/docs/" + id + "/raw")).text();
+      body = `<div class="md">${DOMPurify.sanitize(marked.parse(raw))}</div>`;
+    } else {
+      body = `<div class="empty">No content written yet.</div>`;
+    }
+    const lock = locked_by ? `<span class="badge lock">🔒 ${esc(locked_by)} until ${new Date(locked_until).toLocaleTimeString()}</span>` : "";
+    view.innerHTML = `<div id="docmeta">
+        <strong>${esc(d.title || d.slug)}</strong>
+        <span class="badge">${esc(d.kind)}</span>
+        <span>v${d.version}</span>
+        <span>${d.size_bytes} bytes</span>
+        <span>updated ${new Date(d.updated_at).toLocaleString()}</span>
+        ${lock}
+      </div>${body}`;
+  } catch (e) { view.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+}
+
+function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+$("#q").addEventListener("input", () => { clearTimeout(window._t); window._t = setTimeout(loadList, 200); });
+$("#refresh").onclick = () => { loadList(); if (active) openDoc(active); };
+marked.setOptions({ gfm: true, breaks: false });
+loadList();
+</script>
+</body>
+</html>

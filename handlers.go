@@ -140,6 +140,28 @@ func (s *Server) putDoc(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, doc)
 }
 
+// rawDoc streams a document's current content bytes from RustFS, same-origin,
+// so the web UI can fetch and render it without CORS/presign hassle.
+func (s *Server) rawDoc(w http.ResponseWriter, r *http.Request) {
+	doc, err := s.store.GetDocument(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if doc.ContentKey == "" {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "document has no content yet"})
+		return
+	}
+	rc, err := s.store.GetContent(r.Context(), doc.ContentKey)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	defer rc.Close()
+	w.Header().Set("Content-Type", doc.ContentType)
+	_, _ = io.Copy(w, rc)
+}
+
 // --- locks (leases) ---
 
 func (s *Server) acquireLock(w http.ResponseWriter, r *http.Request) {

@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"time"
 
@@ -331,6 +332,12 @@ func (s *Store) WriteContent(ctx context.Context, docID, owner, leaseToken strin
 		return nil, err
 	}
 	return doc, nil
+}
+
+// GetContent streams an object's bytes from RustFS. Used by the web UI so the
+// browser can fetch content same-origin (agents should prefer PresignGet).
+func (s *Store) GetContent(ctx context.Context, contentKey string) (io.ReadCloser, error) {
+	return s.s3.GetObject(ctx, s.bucket, contentKey, minio.GetObjectOptions{})
 }
 
 // PresignGet returns a time-limited URL the agent can use to fetch content
