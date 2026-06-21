@@ -5,6 +5,7 @@ import (
 	"embed"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -49,22 +50,29 @@ func main() {
 		http.ServeFileFS(w, r, webRoot, "index.html")
 	})
 
-	httpSrv := &http.Server{
-		Addr:              cfg.ListenAddr,
-		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second,
+	authState := "DISABLED (no API_TOKENS)"
+	if len(cfg.APITokens) > 0 {
+		authState = "enabled"
 	}
 
-	go func() {
-		authState := "DISABLED (no API_TOKENS)"
-		if len(cfg.APITokens) > 0 {
-			authState = "enabled"
+	// One http.Server per listen address (e.g. loopback + LAN + ZeroTier), all
+	// sharing the same handler. Bind each up front so a bad/unavailable address
+	// fails fast instead of silently dropping an interface.
+	servers := make([]*http.Server, 0, len(cfg.ListenAddrs))
+	for _, addr := range cfg.ListenAddrs {
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			log.Fatalf("listen on %s: %v", addr, err)
 		}
-		log.Printf("tracker listening on %s | bucket=%s | auth=%s", cfg.ListenAddr, cfg.S3Bucket, authState)
-		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("listen: %v", err)
-		}
-	}()
+		srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+		servers = append(servers, srv)
+		log.Printf("tracker listening on %s | bucket=%s | auth=%s", addr, cfg.S3Bucket, authState)
+		go func() {
+			if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("serve %s: %v", addr, err)
+			}
+		}()
+	}
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
@@ -72,6 +80,8 @@ func main() {
 	log.Println("shutting down...")
 	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = httpSrv.Shutdown(shutCtx)
+	for _, srv := range servers {
+		_ = srv.Shutdown(shutCtx)
+	}
 	store.db.Close()
 }

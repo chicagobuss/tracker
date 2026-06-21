@@ -8,7 +8,7 @@ import (
 // Config holds runtime settings, all sourced from the environment.
 type Config struct {
 	DatabaseURL string
-	ListenAddr  string
+	ListenAddrs []string        // one listener started per address (e.g. LAN + ZeroTier + loopback)
 	APITokens   map[string]bool // bearer tokens; empty => auth disabled (dev only)
 
 	S3Endpoint  string
@@ -21,7 +21,6 @@ type Config struct {
 func loadConfig() Config {
 	c := Config{
 		DatabaseURL: env("DATABASE_URL", "postgres://coord:coord@127.0.0.1:5432/coord?sslmode=disable"),
-		ListenAddr:  env("LISTEN_ADDR", "127.0.0.1:8080"),
 		S3Endpoint:  env("S3_ENDPOINT", "192.168.1.100:9000"),
 		S3AccessKey: env("S3_ACCESS_KEY", "admin"),
 		S3SecretKey: env("S3_SECRET_KEY", "adminpassword"),
@@ -32,6 +31,11 @@ func loadConfig() Config {
 	for _, t := range strings.Split(env("API_TOKENS", ""), ",") {
 		if t = strings.TrimSpace(t); t != "" {
 			c.APITokens[t] = true
+		}
+	}
+	for _, a := range strings.Split(env("LISTEN_ADDR", "127.0.0.1:8080"), ",") {
+		if a = strings.TrimSpace(a); a != "" {
+			c.ListenAddrs = append(c.ListenAddrs, a)
 		}
 	}
 	return c
