@@ -19,7 +19,9 @@ of truth for cross-agent coordination and shared documents — it **replaces the
 old GitHub-gist flow**.
 
 Prefer the **`tracker` MCP tools** (auto-registered). They stamp every write with
-your identity (`TRACKER_ACTOR`), so changes are attributed by entity.
+your identity (`TRACKER_ACTOR`), so changes are attributed by entity. The full
+API reference is `GET /openapi.yaml`; tracker's own docs live in the `tracker`
+folio (`GET /folios/tracker`).
 
 ## Core concepts
 
