@@ -57,15 +57,21 @@ cp .env.example .env          # fill in secrets + set API_TOKENS before exposing
 docker compose up -d          # starts pgvector Postgres + tracker
 ```
 
-Ops:
+Ops (the Makefile stamps the version from git into the binary):
 
 ```bash
-docker compose up -d --build tracker   # rebuild + restart after code changes
+make deploy                            # rebuild image w/ version + restart (no sudo)
+make version                           # show the version that would be embedded
 docker compose logs -f tracker         # logs
-docker compose restart tracker         # restart
+curl http://127.0.0.1:8080/version     # version the running binary reports
 ```
 
-For local dev without a container: `go build -o tracker . && set -a && . ./.env && set +a && ./tracker`.
+The version is `git describe --tags --always --dirty` (a tag if HEAD is tagged,
+else the short sha, `-dirty` if uncommitted). It's logged at startup, served at
+`/version`, and recorded in every backup's `manifest.json` (`binary_version`), so
+a backup always knows which build produced it.
+
+For local dev without a container: `make build && set -a && . ./.env && set +a && ./tracker`.
 
 ## API
 
