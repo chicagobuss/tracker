@@ -21,18 +21,28 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// writeError emits the uniform error envelope: {"error": {"code", "message", ...}}.
+func writeError(w http.ResponseWriter, status int, code, message string, extra map[string]any) {
+	e := map[string]any{"code": code, "message": message}
+	for k, v := range extra {
+		e[k] = v
+	}
+	writeJSON(w, status, map[string]any{"error": e})
+}
+
+// writeErr maps a store sentinel error to its status + machine code.
 func writeErr(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, ErrNotFound):
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		writeError(w, http.StatusNotFound, "not_found", err.Error(), nil)
 	case errors.Is(err, ErrLeaseHeld):
-		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		writeError(w, http.StatusConflict, "lease_held", err.Error(), nil)
 	case errors.Is(err, ErrNoLease):
-		writeJSON(w, http.StatusLocked, map[string]string{"error": err.Error()})
+		writeError(w, http.StatusLocked, "no_lease", err.Error(), nil)
 	case errors.Is(err, ErrVersionConflict):
-		writeJSON(w, http.StatusPreconditionFailed, map[string]string{"error": err.Error()})
+		writeError(w, http.StatusPreconditionFailed, "version_conflict", err.Error(), nil)
 	default:
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeError(w, http.StatusInternalServerError, "internal", err.Error(), nil)
 	}
 }
 
@@ -44,7 +54,7 @@ func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
 			tok := r.Header.Get("Authorization")
 			const p = "Bearer "
 			if len(tok) <= len(p) || tok[:len(p)] != p || !s.cfg.APITokens[tok[len(p):]] {
-				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid or missing bearer token"})
+				writeError(w, http.StatusUnauthorized, "unauthorized", "invalid or missing bearer token", nil)
 				return
 			}
 		}
@@ -53,23 +63,70 @@ func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "version": appVersion()})
 }
 
 func (s *Server) versionInfo(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"version": appVersion()})
+	writeJSON(w, http.StatusOK, map[string]any{"version": appVersion()})
 }
 
 // actor returns the entity performing a mutating request, from the required
-// X-Actor header. On a missing/blank value it writes a 400 and returns false,
-// so attribution is never anonymous.
+// X-Actor header. On a missing/blank value it writes a 400 and returns false.
 func (s *Server) actor(w http.ResponseWriter, r *http.Request) (string, bool) {
 	a := strings.TrimSpace(r.Header.Get("X-Actor"))
 	if a == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "X-Actor header required (the entity performing this action)"})
+		writeError(w, http.StatusBadRequest, "actor_required",
+			"X-Actor header required (the entity performing this action)", nil)
 		return "", false
 	}
 	return a, true
+}
+
+// pageParams reads ?limit=&offset= with sane defaults/caps.
+func pageParams(r *http.Request) (limit, offset int) {
+	limit, offset = 50, 0
+	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 {
+		limit = n
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	if n, err := strconv.Atoi(r.URL.Query().Get("offset")); err == nil && n > 0 {
+		offset = n
+	}
+	return
+}
+
+func badRequest(w http.ResponseWriter, msg string) {
+	writeError(w, http.StatusBadRequest, "bad_request", msg, nil)
+}
+
+// withMeta merges add into a (possibly empty) metadata blob.
+func withMeta(raw json.RawMessage, add map[string]any) json.RawMessage {
+	m := map[string]any{}
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &m)
+	}
+	for k, v := range add {
+		m[k] = v
+	}
+	b, _ := json.Marshal(m)
+	return b
+}
+
+// docEnvelope is the canonical single-document response: the document plus a
+// short-lived content URL and live lock state (null when unlocked).
+func (s *Server) docEnvelope(r *http.Request, doc *Document) map[string]any {
+	resp := map[string]any{"document": doc, "content_url": nil, "lock": nil}
+	if doc.ContentKey != "" {
+		if u, err := s.store.PresignGet(r.Context(), doc.ContentKey, 15*time.Minute); err == nil {
+			resp["content_url"] = u
+		}
+	}
+	if l, live, err := s.store.GetLease(r.Context(), doc.ID); err == nil && live {
+		resp["lock"] = map[string]any{"owner": l.Owner, "expires_at": l.ExpiresAt}
+	}
+	return resp
 }
 
 // --- documents ---
@@ -85,11 +142,11 @@ func (s *Server) createDoc(w http.ResponseWriter, r *http.Request) {
 		Kind        string          `json:"kind"`
 		Tags        []string        `json:"tags"`
 		Metadata    json.RawMessage `json:"metadata"`
-		Content     string          `json:"content"`      // optional initial content
-		ContentType string          `json:"content_type"` // defaults to text/markdown
+		Content     string          `json:"content"`
+		ContentType string          `json:"content_type"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Slug == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "json body with non-empty 'slug' required"})
+		badRequest(w, "json body with non-empty 'slug' required")
 		return
 	}
 	var content []byte
@@ -101,48 +158,20 @@ func (s *Server) createDoc(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, doc)
-}
-
-// --- folios (collections of documents grouped by a folio:<slug> tag) ---
-
-func folioTag(slug string) string { return "folio:" + slug }
-
-func (s *Server) listFolios(w http.ResponseWriter, r *http.Request) {
-	folios, err := s.store.ListDocuments(r.Context(), "", "folio", "")
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"folios": folios})
-}
-
-func (s *Server) getFolio(w http.ResponseWriter, r *http.Request) {
-	slug := r.PathValue("slug")
-	folio, err := s.store.GetDocument(r.Context(), slug)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	files, err := s.store.ListDocuments(r.Context(), "", "", folioTag(folio.Slug))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"folio": folio, "files": files})
+	writeJSON(w, http.StatusCreated, map[string]any{"document": doc})
 }
 
 func (s *Server) listDocs(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	docs, err := s.store.ListDocuments(r.Context(), q.Get("q"), q.Get("kind"), q.Get("tag"))
+	limit, offset := pageParams(r)
+	docs, total, err := s.store.ListDocuments(r.Context(), q.Get("q"), q.Get("kind"), q.Get("tag"), limit, offset)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	if docs == nil {
-		docs = []Document{}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"documents": docs})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"documents": docs, "count": len(docs), "total": total, "limit": limit, "offset": offset,
+	})
 }
 
 func (s *Server) getDoc(w http.ResponseWriter, r *http.Request) {
@@ -151,25 +180,11 @@ func (s *Server) getDoc(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	resp := map[string]any{"document": doc}
-	if doc.ContentKey != "" {
-		if u, err := s.store.PresignGet(r.Context(), doc.ContentKey, 15*time.Minute); err == nil {
-			resp["content_url"] = u
-		}
-	}
-	// Surface live-lock state so a reader can see if someone's mid-write.
-	if l, live, err := s.store.GetLease(r.Context(), doc.ID); err == nil && live {
-		resp["locked_by"] = l.Owner
-		resp["locked_until"] = l.ExpiresAt
-	}
-	writeJSON(w, http.StatusOK, resp)
+	writeJSON(w, http.StatusOK, s.docEnvelope(r, doc))
 }
 
-// putDoc writes content. Requires headers:
-//
-//	X-Actor:       the entity writing (must hold the lease)
-//	X-Lease-Token: the lease token from POST /docs/{id}/lock
-//	If-Match:      the document version you based this write on (optimistic CAS)
+// putDoc writes content. Headers: X-Actor (must hold the lease), X-Lease-Token,
+// If-Match (the integer base version, optimistic CAS).
 func (s *Server) putDoc(w http.ResponseWriter, r *http.Request) {
 	owner, ok := s.actor(w, r)
 	if !ok {
@@ -178,12 +193,12 @@ func (s *Server) putDoc(w http.ResponseWriter, r *http.Request) {
 	token := r.Header.Get("X-Lease-Token")
 	baseVersion, err := strconv.Atoi(r.Header.Get("If-Match"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "If-Match header must be the integer base version"})
+		badRequest(w, "If-Match header must be the integer base version")
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 64<<20)) // 64 MiB cap
+	body, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "could not read body"})
+		badRequest(w, "could not read body")
 		return
 	}
 	ctype := r.Header.Get("Content-Type")
@@ -195,19 +210,22 @@ func (s *Server) putDoc(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, doc)
+	writeJSON(w, http.StatusOK, map[string]any{"document": doc})
 }
 
-// rawDoc streams a document's current content bytes from RustFS, same-origin,
-// so the web UI can fetch and render it without CORS/presign hassle.
+// rawDoc streams a document's content bytes (same-origin; the UI uses this).
 func (s *Server) rawDoc(w http.ResponseWriter, r *http.Request) {
-	doc, err := s.store.GetDocument(r.Context(), r.PathValue("id"))
+	s.streamContent(w, r, r.PathValue("id"))
+}
+
+func (s *Server) streamContent(w http.ResponseWriter, r *http.Request, idOrSlug string) {
+	doc, err := s.store.GetDocument(r.Context(), idOrSlug)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 	if doc.ContentKey == "" {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "document has no content yet"})
+		writeError(w, http.StatusNotFound, "no_content", "document has no content yet", nil)
 		return
 	}
 	rc, err := s.store.GetContent(r.Context(), doc.ContentKey)
@@ -220,6 +238,127 @@ func (s *Server) rawDoc(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.Copy(w, rc)
 }
 
+// --- folios (collections; a folio is a kind=folio doc, members carry folio:<slug>) ---
+
+func folioTag(slug string) string { return "folio:" + slug }
+
+func (s *Server) listFolios(w http.ResponseWriter, r *http.Request) {
+	folios, total, err := s.store.ListDocuments(r.Context(), "", "folio", "", 500, 0)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"folios": folios, "count": len(folios), "total": total})
+}
+
+func (s *Server) createFolio(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.actor(w, r)
+	if !ok {
+		return
+	}
+	var in struct {
+		Slug        string `json:"slug"`
+		Title       string `json:"title"`
+		Description string `json:"description"`
+		Public      bool   `json:"public"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Slug == "" {
+		badRequest(w, "json body with non-empty 'slug' required")
+		return
+	}
+	meta := withMeta(nil, map[string]any{"description": in.Description, "public": in.Public})
+	title := in.Title
+	if title == "" {
+		title = in.Description
+	}
+	doc, err := s.store.CreateDocument(r.Context(), in.Slug, title, "folio", nil, meta, nil, "", actor)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"folio": doc})
+}
+
+func (s *Server) getFolio(w http.ResponseWriter, r *http.Request) {
+	folio, err := s.store.GetDocument(r.Context(), r.PathValue("slug"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	files, total, err := s.store.ListDocuments(r.Context(), "", "", folioTag(folio.Slug), 500, 0)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"folio": folio, "files": files, "count": len(files), "total": total})
+}
+
+// createFolioFile adds a document to a folio, applying the folio: tag and the
+// <folio>/<filename> slug convention server-side, so callers don't have to know it.
+func (s *Server) createFolioFile(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.actor(w, r)
+	if !ok {
+		return
+	}
+	folioSlug := r.PathValue("slug")
+	folio, err := s.store.GetDocument(r.Context(), folioSlug)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if folio.Kind != "folio" {
+		writeError(w, http.StatusBadRequest, "not_a_folio", "'"+folioSlug+"' is not a folio", nil)
+		return
+	}
+	var in struct {
+		Filename    string          `json:"filename"`
+		Title       string          `json:"title"`
+		Kind        string          `json:"kind"`
+		Content     string          `json:"content"`
+		ContentType string          `json:"content_type"`
+		Metadata    json.RawMessage `json:"metadata"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Filename == "" {
+		badRequest(w, "json body with non-empty 'filename' required")
+		return
+	}
+	kind := in.Kind
+	if kind == "" {
+		kind = "note"
+	}
+	title := in.Title
+	if title == "" {
+		title = in.Filename
+	}
+	meta := withMeta(in.Metadata, map[string]any{"filename": in.Filename, "folio": folio.Slug})
+	var content []byte
+	if in.Content != "" {
+		content = []byte(in.Content)
+	}
+	doc, err := s.store.CreateDocument(r.Context(), folio.Slug+"/"+in.Filename, title, kind,
+		[]string{folioTag(folio.Slug)}, meta, content, in.ContentType, actor)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"document": doc})
+}
+
+// getFolioFile addresses a folio member by name (so files whose slug contains a
+// '/' are reachable without their UUID).
+func (s *Server) getFolioFile(w http.ResponseWriter, r *http.Request) {
+	doc, err := s.store.GetDocument(r.Context(), r.PathValue("slug")+"/"+r.PathValue("filename"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.docEnvelope(r, doc))
+}
+
+func (s *Server) rawFolioFile(w http.ResponseWriter, r *http.Request) {
+	s.streamContent(w, r, r.PathValue("slug")+"/"+r.PathValue("filename"))
+}
+
 // --- locks (leases) ---
 
 func (s *Server) acquireLock(w http.ResponseWriter, r *http.Request) {
@@ -230,7 +369,7 @@ func (s *Server) acquireLock(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Reason     string `json:"reason"`
 		TTLSeconds int    `json:"ttl_seconds"`
-		LeaseToken string `json:"lease_token"` // present => renew
+		LeaseToken string `json:"lease_token"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&in)
 	ttl := time.Duration(in.TTLSeconds) * time.Second
@@ -239,14 +378,15 @@ func (s *Server) acquireLock(w http.ResponseWriter, r *http.Request) {
 	}
 	lease, err := s.store.AcquireLease(r.Context(), r.PathValue("id"), owner, in.Reason, ttl, in.LeaseToken)
 	if errors.Is(err, ErrLeaseHeld) {
-		writeJSON(w, http.StatusConflict, map[string]any{"error": "locked", "held_by": lease.Owner, "expires_at": lease.ExpiresAt})
+		writeError(w, http.StatusConflict, "lease_held", "document is locked by another actor",
+			map[string]any{"held_by": lease.Owner, "expires_at": lease.ExpiresAt})
 		return
 	}
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, lease)
+	writeJSON(w, http.StatusOK, map[string]any{"lock": lease})
 }
 
 func (s *Server) getLock(w http.ResponseWriter, r *http.Request) {
@@ -256,23 +396,23 @@ func (s *Server) getLock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if lease == nil || !live {
-		writeJSON(w, http.StatusOK, map[string]any{"locked": false})
+		writeJSON(w, http.StatusOK, map[string]any{"locked": false, "lock": nil})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"locked": true, "lease": lease})
+	writeJSON(w, http.StatusOK, map[string]any{"locked": true, "lock": lease})
 }
 
 func (s *Server) releaseLock(w http.ResponseWriter, r *http.Request) {
 	token := r.Header.Get("X-Lease-Token")
 	if token == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "X-Lease-Token header required"})
+		badRequest(w, "X-Lease-Token header required")
 		return
 	}
 	if err := s.store.ReleaseLease(r.Context(), r.PathValue("id"), token); err != nil {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "released"})
+	writeJSON(w, http.StatusOK, map[string]any{"released": true})
 }
 
 // --- tasks ---
@@ -292,7 +432,7 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, task)
+	writeJSON(w, http.StatusCreated, map[string]any{"task": task})
 }
 
 func (s *Server) claimTask(w http.ResponseWriter, r *http.Request) {
@@ -302,14 +442,14 @@ func (s *Server) claimTask(w http.ResponseWriter, r *http.Request) {
 	}
 	task, err := s.store.ClaimNextTask(r.Context(), worker)
 	if errors.Is(err, ErrNotFound) {
-		writeJSON(w, http.StatusNoContent, nil)
+		writeJSON(w, http.StatusOK, map[string]any{"task": nil})
 		return
 	}
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, task)
+	writeJSON(w, http.StatusOK, map[string]any{"task": task})
 }
 
 func (s *Server) completeTask(w http.ResponseWriter, r *http.Request) {
@@ -327,7 +467,7 @@ func (s *Server) completeTask(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, task)
+	writeJSON(w, http.StatusOK, map[string]any{"task": task})
 }
 
 // --- actors ---
@@ -338,7 +478,7 @@ func (s *Server) listActors(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"actors": actors})
+	writeJSON(w, http.StatusOK, map[string]any{"actors": actors, "count": len(actors)})
 }
 
 func (s *Server) actorActivity(w http.ResponseWriter, r *http.Request) {
@@ -351,5 +491,5 @@ func (s *Server) actorActivity(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"activity": items})
+	writeJSON(w, http.StatusOK, map[string]any{"activity": items, "count": len(items)})
 }

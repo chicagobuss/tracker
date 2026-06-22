@@ -209,26 +209,41 @@ func (s *Store) GetDocument(ctx context.Context, idOrSlug string) (*Document, er
 	return scanDoc(s.db.QueryRow(ctx, `select `+docSelect+` from documents where `+idClause, idOrSlug))
 }
 
-func (s *Store) ListDocuments(ctx context.Context, q, kind, tag string) ([]Document, error) {
-	rows, err := s.db.Query(ctx, `
-		select `+docSelect+` from documents
-		where ($1 = '' or fts @@ plainto_tsquery('english', $1))
+// ListDocuments returns a page of documents matching the filters plus the total
+// match count (for pagination). limit defaults to 50 (cap 200) when <= 0.
+func (s *Store) ListDocuments(ctx context.Context, q, kind, tag string, limit, offset int) ([]Document, int, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	const filter = `where ($1 = '' or fts @@ plainto_tsquery('english', $1))
 		  and ($2 = '' or kind = $2)
-		  and ($3 = '' or $3 = any(tags))
-		order by updated_at desc limit 200`, q, kind, tag)
+		  and ($3 = '' or $3 = any(tags))`
+
+	var total int
+	if err := s.db.QueryRow(ctx, `select count(*) from documents `+filter, q, kind, tag).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := s.db.Query(ctx, `select `+docSelect+` from documents `+filter+`
+		order by updated_at desc limit $4 offset $5`, q, kind, tag, limit, offset)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
-	var out []Document
+	out := []Document{}
 	for rows.Next() {
 		d, err := scanDoc(rows)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		out = append(out, *d)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
 }
 
 // AcquireLease acquires, renews (when leaseToken matches the live holder), or

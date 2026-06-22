@@ -83,8 +83,7 @@ def read_doc(id_or_slug: str) -> dict:
             raw = c.get(f"/docs/{doc['id']}/raw")
             if raw.status_code == 200:
                 content = raw.text
-        return {"document": doc, "content": content,
-                "locked_by": data.get("locked_by"), "locked_until": data.get("locked_until")}
+        return {"document": doc, "content": content, "lock": data.get("lock")}
 
 
 @mcp.tool()
@@ -113,29 +112,26 @@ def list_actors() -> dict:
 @mcp.tool()
 def create_doc(slug: str, title: str = "", kind: str = "note", content: str = "",
                tags: list[str] | None = None, folio: str = "") -> dict:
-    """Create a document. If `folio` (a folio slug) is given, the doc is added to
-    that folio (tagged folio:<slug>, slug namespaced under it). `content` seeds v1."""
-    if folio:
-        tags = (tags or []) + [f"folio:{folio}"]
-        if not slug.startswith(f"{folio}/"):
-            slug = f"{folio}/{slug}"
-    body = {"slug": slug, "title": title or slug, "kind": kind,
-            "tags": tags or [], "content": content}
+    """Create a document. If `folio` (a folio slug) is given, `slug` is treated as
+    the filename within that folio (the server namespaces it). `content` seeds v1."""
     with httpx.Client(base_url=BASE, timeout=30, headers=_headers(mutating=True)) as c:
-        r = c.post("/docs", json=body)
+        if folio:
+            r = c.post(f"/folios/{folio}/files",
+                       json={"filename": slug, "title": title, "kind": kind, "content": content})
+        else:
+            r = c.post("/docs", json={"slug": slug, "title": title or slug, "kind": kind,
+                                      "tags": tags or [], "content": content})
         r.raise_for_status()
-        return r.json()
+        return r.json().get("document", r.json())
 
 
 @mcp.tool()
 def create_folio(slug: str, description: str = "", public: bool = False) -> dict:
     """Create a folio (a collection). Its files are added with create_doc(folio=slug)."""
-    body = {"slug": slug, "title": description or slug, "kind": "folio",
-            "metadata": {"description": description, "public": public}}
     with httpx.Client(base_url=BASE, timeout=30, headers=_headers(mutating=True)) as c:
-        r = c.post("/docs", json=body)
+        r = c.post("/folios", json={"slug": slug, "description": description, "public": public})
         r.raise_for_status()
-        return r.json()
+        return r.json().get("folio", r.json())
 
 
 @mcp.tool()
@@ -153,7 +149,7 @@ def update_doc(id_or_slug: str, content: str) -> dict:
         if lock.status_code == 409:
             return {"ok": False, "error": "locked by another agent", "detail": lock.json()}
         lock.raise_for_status()
-        token = lock.json()["lease_token"]
+        token = lock.json()["lock"]["lease_token"]
         try:
             put = c.put(f"/docs/{did}", content=content.encode(),
                         headers={"X-Lease-Token": token, "If-Match": str(version),
@@ -161,7 +157,7 @@ def update_doc(id_or_slug: str, content: str) -> dict:
             if put.status_code == 412:
                 return {"ok": False, "error": "version changed under you; re-read and retry"}
             put.raise_for_status()
-            return {"ok": True, "document": put.json()}
+            return {"ok": True, "document": put.json()["document"]}
         finally:
             c.request("DELETE", f"/docs/{did}/lock", headers={"X-Lease-Token": token})
 
@@ -174,7 +170,7 @@ def create_task(title: str, payload: dict | None = None) -> dict:
     with httpx.Client(base_url=BASE, timeout=30, headers=_headers(mutating=True)) as c:
         r = c.post("/tasks", json={"title": title, "payload": payload or {}})
         r.raise_for_status()
-        return r.json()
+        return r.json().get("task", r.json())
 
 
 @mcp.tool()
@@ -183,10 +179,9 @@ def claim_task() -> dict:
     Returns the task, or {claimed: false} if the queue is empty."""
     with httpx.Client(base_url=BASE, timeout=30, headers=_headers(mutating=True)) as c:
         r = c.post("/tasks/claim", json={})
-        if r.status_code == 204:
-            return {"claimed": False}
         r.raise_for_status()
-        return {"claimed": True, "task": r.json()}
+        task = r.json().get("task")
+        return {"claimed": bool(task), "task": task}
 
 
 @mcp.tool()
@@ -195,7 +190,7 @@ def complete_task(task_id: str, status: str = "done", result: dict | None = None
     with httpx.Client(base_url=BASE, timeout=30, headers=_headers(mutating=True)) as c:
         r = c.post(f"/tasks/{task_id}/complete", json={"status": status, "result": result or {}})
         r.raise_for_status()
-        return r.json()
+        return r.json().get("task", r.json())
 
 
 if __name__ == "__main__":

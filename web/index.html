@@ -89,7 +89,7 @@ async function openDoc(id) {
   loadList();
   const view = $("#view");
   try {
-    const { document: d, locked_by, locked_until } = await (await api("/docs/" + id)).json();
+    const { document: d, lock: lk } = await (await api("/docs/" + id)).json();
     let body = "";
     if (d.content_key) {
       const raw = await (await api("/docs/" + id + "/raw")).text();
@@ -97,7 +97,7 @@ async function openDoc(id) {
     } else {
       body = `<div class="empty">No content written yet.</div>`;
     }
-    const lock = locked_by ? `<span class="badge lock">🔒 ${esc(locked_by)} until ${new Date(locked_until).toLocaleTimeString()}</span>` : "";
+    const lock = lk ? `<span class="badge lock">🔒 ${esc(lk.owner)} until ${new Date(lk.expires_at).toLocaleTimeString()}</span>` : "";
     view.innerHTML = `<div id="docmeta">
         <strong>${esc(d.title || d.slug)}</strong>
         <span class="badge">${esc(d.kind)}</span>

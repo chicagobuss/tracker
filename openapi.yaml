@@ -1,0 +1,357 @@
+openapi: 3.1.0
+info:
+  title: tracker API
+  version: 1.1.0
+  description: |
+    **tracker** is a self-hosted coordination store for a fleet of coding agents:
+    a Postgres index of documents + content-addressed blobs in S3 (RustFS), with
+    a lease-based "who's writing" lock and per-entity attribution.
+
+    ## Conventions
+    - **Envelopes:** every response is a JSON object. A single resource is wrapped
+      under its type (`{"document": …}`, `{"folio": …}`, `{"task": …}`,
+      `{"lock": …}`); lists are `{"<type>s": […], "count", "total", "limit",
+      "offset"}`. Errors are `{"error": {"code", "message", …}}`.
+    - **Acting entity:** every mutating request must send an `X-Actor` header
+      naming the entity performing it (else `400 actor_required`). It is recorded
+      as the doc's author, the lease owner, the task claimer, and in the actors
+      registry. On a trusted network it is self-asserted, not authenticated.
+    - **Identifiers:** `{id}` accepts a document UUID or a single-segment slug.
+      Folio files (whose slug contains `/`) are addressed by UUID or via
+      `/folios/{slug}/files/{filename}`.
+
+    ## Writing a document (the coordination dance)
+    1. `POST /docs/{id}/lock` → obtain a `lease_token` (TTL, default 60s).
+    2. `PUT /docs/{id}` with headers `X-Actor`, `X-Lease-Token`, and
+       `If-Match: <current version>` (optimistic concurrency).
+    3. `DELETE /docs/{id}/lock` to release (or let the lease expire).
+
+    A write fails with `409 lease_held` if another actor holds the lease,
+    `423 no_lease` if you don't hold it, or `412 version_conflict` if the version
+    moved under you.
+
+    ## Folios
+    A **folio** is a collection of related documents (think: a gist). It is itself
+    a `kind=folio` document whose `metadata` holds its description; its files are
+    documents tagged `folio:<slug>` with slug `<folio>/<filename>`.
+
+servers:
+  - url: http://127.0.0.1:8080
+    description: local
+  - url: http://10.10.10.10:8080
+    description: ZeroTier
+
+security:
+  - bearerAuth: []
+  - {} # auth is disabled when API_TOKENS is unset
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  parameters:
+    Actor:
+      name: X-Actor
+      in: header
+      required: true
+      schema: { type: string }
+      description: The entity performing this action.
+  schemas:
+    Document:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        slug: { type: string }
+        title: { type: string }
+        kind: { type: string, description: "note | spec | folio | …" }
+        content_key: { type: string, description: "S3 object key (sha256/<hash>)" }
+        content_hash: { type: string }
+        content_type: { type: string }
+        size_bytes: { type: integer }
+        tags: { type: array, items: { type: string } }
+        metadata: { type: object, additionalProperties: true }
+        version: { type: integer, description: "bumped on each content write; pass as If-Match" }
+        created_by: { type: string }
+        updated_by: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    Lock:
+      type: object
+      properties:
+        document_id: { type: string, format: uuid }
+        owner: { type: string }
+        lease_token: { type: string, format: uuid }
+        reason: { type: string }
+        acquired_at: { type: string, format: date-time }
+        renewed_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+    Task:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        status: { type: string, description: "open | claimed | done | failed" }
+        claimed_by: { type: string }
+        claimed_at: { type: string, format: date-time }
+        payload: { type: object, additionalProperties: true }
+        result: { type: object, additionalProperties: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    Actor:
+      type: object
+      properties:
+        name: { type: string }
+        first_seen: { type: string, format: date-time }
+        last_seen: { type: string, format: date-time }
+        action_count: { type: integer }
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string, description: "machine code: not_found, lease_held, no_lease, version_conflict, bad_request, actor_required, unauthorized, internal" }
+            message: { type: string }
+          additionalProperties: true
+  responses:
+    BadRequest: { description: "Invalid request", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    NotFound: { description: "Not found", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+
+paths:
+  /healthz:
+    get:
+      summary: Liveness check
+      security: []
+      responses: { "200": { description: ok } }
+  /version:
+    get:
+      summary: Running binary version
+      security: []
+      responses:
+        "200":
+          description: version
+          content: { application/json: { schema: { type: object, properties: { version: { type: string } } } } }
+
+  /docs:
+    get:
+      summary: List / full-text search documents
+      parameters:
+        - { name: q, in: query, schema: { type: string }, description: full-text query }
+        - { name: kind, in: query, schema: { type: string } }
+        - { name: tag, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 200 } }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+      responses:
+        "200":
+          description: a page of documents
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  documents: { type: array, items: { $ref: '#/components/schemas/Document' } }
+                  count: { type: integer }
+                  total: { type: integer }
+                  limit: { type: integer }
+                  offset: { type: integer }
+    post:
+      summary: Create a document
+      parameters: [ { $ref: '#/components/parameters/Actor' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [slug]
+              properties:
+                slug: { type: string }
+                title: { type: string }
+                kind: { type: string, default: note }
+                tags: { type: array, items: { type: string } }
+                metadata: { type: object, additionalProperties: true }
+                content: { type: string, description: "optional; seeds version 1" }
+                content_type: { type: string, default: text/markdown }
+      responses:
+        "201": { description: created, content: { application/json: { schema: { type: object, properties: { document: { $ref: '#/components/schemas/Document' } } } } } }
+        "400": { $ref: '#/components/responses/BadRequest' }
+
+  /docs/{id}:
+    parameters: [ { name: id, in: path, required: true, schema: { type: string }, description: "UUID or single-segment slug" } ]
+    get:
+      summary: Get a document (metadata + content URL + live lock)
+      responses:
+        "200":
+          description: document
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  document: { $ref: '#/components/schemas/Document' }
+                  content_url: { type: [string, "null"], description: "short-lived presigned GET URL" }
+                  lock: { oneOf: [ { type: "null" }, { type: object, properties: { owner: { type: string }, expires_at: { type: string, format: date-time } } } ] }
+        "404": { $ref: '#/components/responses/NotFound' }
+    put:
+      summary: Write content (requires a held lease + version match)
+      parameters:
+        - { $ref: '#/components/parameters/Actor' }
+        - { name: X-Lease-Token, in: header, required: true, schema: { type: string } }
+        - { name: If-Match, in: header, required: true, schema: { type: integer }, description: "the base version (optimistic CAS)" }
+      requestBody: { required: true, content: { "text/markdown": { schema: { type: string } } } }
+      responses:
+        "200": { description: written, content: { application/json: { schema: { type: object, properties: { document: { $ref: '#/components/schemas/Document' } } } } } }
+        "412": { description: "version_conflict", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        "423": { description: "no_lease (you don't hold the lease)", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+
+  /docs/{id}/raw:
+    get:
+      summary: Stream a document's raw content bytes
+      parameters: [ { name: id, in: path, required: true, schema: { type: string } } ]
+      responses: { "200": { description: content bytes, content: { "*/*": {} } }, "404": { $ref: '#/components/responses/NotFound' } }
+
+  /docs/{id}/lock:
+    parameters: [ { name: id, in: path, required: true, schema: { type: string } } ]
+    get:
+      summary: Lock status — is anyone writing this?
+      responses:
+        "200":
+          description: lock state
+          content: { application/json: { schema: { type: object, properties: { locked: { type: boolean }, lock: { oneOf: [ { type: "null" }, { $ref: '#/components/schemas/Lock' } ] } } } } }
+    post:
+      summary: Acquire or renew the write-lease
+      parameters: [ { $ref: '#/components/parameters/Actor' } ]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ttl_seconds: { type: integer, default: 60 }
+                reason: { type: string }
+                lease_token: { type: string, description: "present => renew an existing lease" }
+      responses:
+        "200": { description: granted, content: { application/json: { schema: { type: object, properties: { lock: { $ref: '#/components/schemas/Lock' } } } } } }
+        "409": { description: "lease_held by another actor", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    delete:
+      summary: Release the lease (must present the token)
+      parameters: [ { name: X-Lease-Token, in: header, required: true, schema: { type: string } } ]
+      responses:
+        "200": { description: released, content: { application/json: { schema: { type: object, properties: { released: { type: boolean } } } } } }
+        "423": { description: "no_lease", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+
+  /folios:
+    get:
+      summary: List folios
+      responses:
+        "200": { description: folios, content: { application/json: { schema: { type: object, properties: { folios: { type: array, items: { $ref: '#/components/schemas/Document' } }, count: { type: integer }, total: { type: integer } } } } } }
+    post:
+      summary: Create a folio
+      parameters: [ { $ref: '#/components/parameters/Actor' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [slug]
+              properties:
+                slug: { type: string }
+                title: { type: string }
+                description: { type: string }
+                public: { type: boolean }
+      responses:
+        "201": { description: created, content: { application/json: { schema: { type: object, properties: { folio: { $ref: '#/components/schemas/Document' } } } } } }
+
+  /folios/{slug}:
+    parameters: [ { name: slug, in: path, required: true, schema: { type: string } } ]
+    get:
+      summary: Get a folio and its files
+      responses:
+        "200": { description: folio + files, content: { application/json: { schema: { type: object, properties: { folio: { $ref: '#/components/schemas/Document' }, files: { type: array, items: { $ref: '#/components/schemas/Document' } }, count: { type: integer } } } } } }
+        "404": { $ref: '#/components/responses/NotFound' }
+
+  /folios/{slug}/files:
+    post:
+      summary: Add a file to a folio (server applies the tag + slug convention)
+      parameters:
+        - { name: slug, in: path, required: true, schema: { type: string } }
+        - { $ref: '#/components/parameters/Actor' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [filename]
+              properties:
+                filename: { type: string }
+                title: { type: string }
+                kind: { type: string, default: note }
+                content: { type: string }
+                content_type: { type: string, default: text/markdown }
+                metadata: { type: object, additionalProperties: true }
+      responses:
+        "201": { description: created, content: { application/json: { schema: { type: object, properties: { document: { $ref: '#/components/schemas/Document' } } } } } }
+
+  /folios/{slug}/files/{filename}:
+    parameters:
+      - { name: slug, in: path, required: true, schema: { type: string } }
+      - { name: filename, in: path, required: true, schema: { type: string } }
+    get:
+      summary: Get a folio file by name (no UUID needed)
+      responses:
+        "200": { description: document, content: { application/json: { schema: { type: object, properties: { document: { $ref: '#/components/schemas/Document' }, content_url: { type: [string, "null"] }, lock: { type: [object, "null"] } } } } } }
+        "404": { $ref: '#/components/responses/NotFound' }
+
+  /tasks:
+    post:
+      summary: Enqueue a task
+      parameters: [ { $ref: '#/components/parameters/Actor' } ]
+      requestBody:
+        content: { application/json: { schema: { type: object, properties: { title: { type: string }, payload: { type: object, additionalProperties: true } } } } }
+      responses:
+        "201": { description: created, content: { application/json: { schema: { type: object, properties: { task: { $ref: '#/components/schemas/Task' } } } } } }
+
+  /tasks/claim:
+    post:
+      summary: Atomically claim the next open task
+      parameters: [ { $ref: '#/components/parameters/Actor' } ]
+      responses:
+        "200":
+          description: "the claimed task, or {task:null} when the queue is empty"
+          content: { application/json: { schema: { type: object, properties: { task: { oneOf: [ { type: "null" }, { $ref: '#/components/schemas/Task' } ] } } } } }
+
+  /tasks/{id}/complete:
+    post:
+      summary: Mark a task done|failed
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { $ref: '#/components/parameters/Actor' }
+      requestBody:
+        content: { application/json: { schema: { type: object, properties: { status: { type: string, enum: [done, failed] }, result: { type: object, additionalProperties: true } } } } }
+      responses:
+        "200": { description: updated, content: { application/json: { schema: { type: object, properties: { task: { $ref: '#/components/schemas/Task' } } } } } }
+
+  /actors:
+    get:
+      summary: List entities that have acted on the store
+      responses:
+        "200": { description: actors, content: { application/json: { schema: { type: object, properties: { actors: { type: array, items: { $ref: '#/components/schemas/Actor' } }, count: { type: integer } } } } } }
+
+  /actors/{name}/activity:
+    get:
+      summary: An entity's recent document writes
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, default: 50 } }
+      responses:
+        "200": { description: activity, content: { application/json: { schema: { type: object, properties: { activity: { type: array, items: { type: object } }, count: { type: integer } } } } } }
+
+  /openapi.yaml:
+    get:
+      summary: This spec
+      security: []
+      responses: { "200": { description: the OpenAPI document, content: { "application/yaml": {} } } }

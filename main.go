@@ -16,6 +16,9 @@ import (
 //go:embed web
 var webFS embed.FS
 
+//go:embed openapi.yaml
+var openapiSpec []byte
+
 func main() {
 	cfg := loadConfig()
 
@@ -29,6 +32,10 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", srv.health)
 	mux.HandleFunc("GET /version", srv.versionInfo)
+	mux.HandleFunc("GET /openapi.yaml", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/yaml")
+		_, _ = w.Write(openapiSpec)
+	})
 
 	mux.HandleFunc("POST /docs", srv.auth(srv.createDoc))
 	mux.HandleFunc("GET /docs", srv.auth(srv.listDocs))
@@ -48,7 +55,11 @@ func main() {
 	mux.HandleFunc("GET /actors/{name}/activity", srv.auth(srv.actorActivity))
 
 	mux.HandleFunc("GET /folios", srv.auth(srv.listFolios))
+	mux.HandleFunc("POST /folios", srv.auth(srv.createFolio))
 	mux.HandleFunc("GET /folios/{slug}", srv.auth(srv.getFolio))
+	mux.HandleFunc("POST /folios/{slug}/files", srv.auth(srv.createFolioFile))
+	mux.HandleFunc("GET /folios/{slug}/files/{filename}", srv.auth(srv.getFolioFile))
+	mux.HandleFunc("GET /folios/{slug}/files/{filename}/raw", srv.auth(srv.rawFolioFile))
 
 	// Web UI (unauthenticated static assets; data fetches carry the bearer token).
 	webRoot, _ := fs.Sub(webFS, "web")

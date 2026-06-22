@@ -78,20 +78,28 @@ For local dev without a container: `make build && set -a && . ./.env && set +a &
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/healthz` | health check |
+| GET | `/openapi.yaml` | the full OpenAPI 3.1 spec (authoritative reference) |
 | POST | `/docs` | create doc (`{slug,title,kind,tags,metadata,content,content_type}`; `content` seeds v1) |
-| GET | `/docs` | list/search (`?q=&kind=&tag=`) |
-| GET | `/docs/{id}` | metadata + presigned `content_url` + live `locked_by` |
-| PUT | `/docs/{id}` | write content; headers `X-Lease-Token`, `If-Match: <version>` |
+| GET | `/docs` | list/search (`?q=&kind=&tag=&limit=&offset=`) |
+| GET | `/docs/{id}` | `{document, content_url, lock}` |
+| PUT | `/docs/{id}` | write content; headers `X-Actor`, `X-Lease-Token`, `If-Match: <version>` |
 | POST | `/docs/{id}/lock` | acquire/renew lease (`{ttl_seconds,reason,lease_token}`); `409` if held |
 | GET | `/docs/{id}/lock` | is it locked, by whom |
 | DELETE | `/docs/{id}/lock` | release (header `X-Lease-Token`) |
-| POST | `/tasks` | enqueue task (`{title,payload}`) |
-| POST | `/tasks/claim` | atomically claim next open task; `204` if empty |
-| POST | `/tasks/{id}/complete` | finish (`{status,result}`) |
-| GET | `/actors` | registry of entities with `first_seen`/`last_seen`/`action_count` |
-| GET | `/actors/{name}/activity` | that entity's recent doc writes (`?limit=`) |
-| GET | `/folios` | list folios (collections; `kind=folio` documents) |
-| GET | `/folios/{slug}` | a folio document + its member files |
+| GET | `/folios` · POST `/folios` | list / create a folio |
+| GET | `/folios/{slug}` | a folio + its files |
+| POST | `/folios/{slug}/files` | add a file (server applies the tag + slug) |
+| GET | `/folios/{slug}/files/{filename}` | a folio file by name (`/raw` for bytes) |
+| POST | `/tasks` · `/tasks/claim` · `/tasks/{id}/complete` | task queue |
+| GET | `/actors` · `/actors/{name}/activity` | entity registry + activity |
+
+The **authoritative reference is `openapi.yaml`** (served live at `/openapi.yaml`).
+
+**Conventions.** Every response is wrapped — a single resource under its type
+(`{"document":…}`, `{"folio":…}`, `{"task":…}`, `{"lock":…}`), lists as
+`{"<type>s":[…],"count","total","limit","offset"}`, errors as
+`{"error":{"code","message",…}}` with machine codes (`not_found`, `lease_held`,
+`no_lease`, `version_conflict`, …).
 
 ### Folios
 
@@ -99,10 +107,12 @@ A **folio** is a little collection of related documents (think: a GitHub gist).
 It's modelled tableless: the folio is itself a document with `kind='folio'`
 whose `metadata` holds `{description, public, github_id, ...}`; its files are
 documents tagged `folio:<slug>` with slug `<folio-slug>/<filename>`. So a folio
-file inherits everything (versioning, leases, attribution, search). Import your
-recent gists with `scripts/import_gists.py` (uses the `gh` CLI).
+file inherits everything (versioning, leases, attribution, search). Create one
+with `POST /folios` and add files with `POST /folios/{slug}/files`; import your
+recent gists with `scripts/import_gists.py`.
 
-`{id}` accepts either the UUID or the slug.
+`{id}` accepts a UUID or a single-segment slug; folio files (slug has `/`) are
+addressed by UUID or via `/folios/{slug}/files/{filename}`.
 
 ### Acting entity
 
