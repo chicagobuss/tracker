@@ -14,12 +14,39 @@ identity. Config via env:
     TRACKER_TOKEN  bearer token, only if the server has API_TOKENS set
 """
 import os
+import socket
+from urllib.parse import urlparse
 import httpx
 from mcp.server.fastmcp import FastMCP
 
 BASE = os.environ.get("TRACKER_URL", "http://127.0.0.1:8080").rstrip("/")
-ACTOR = os.environ.get("TRACKER_ACTOR", "claude-code")
 TOKEN = os.environ.get("TRACKER_TOKEN", "")
+
+
+def _local_ip() -> str:
+    """The local IP this host uses to reach tracker (e.g. its ZeroTier address)."""
+    try:
+        u = urlparse(BASE)
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect((u.hostname or "127.0.0.1", u.port or 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "?"
+
+
+def _resolve_actor() -> str:
+    """Actor identity = <role>@<hostname>/<ip>, so attribution names not just the
+    agent role but the machine it ran on. Override the role with TRACKER_ACTOR;
+    set TRACKER_ACTOR_FULL to bypass the host/ip suffix entirely."""
+    if full := os.environ.get("TRACKER_ACTOR_FULL"):
+        return full
+    role = os.environ.get("TRACKER_ACTOR", "claude-code")
+    return f"{role}@{socket.gethostname()}/{_local_ip()}"
+
+
+ACTOR = _resolve_actor()
 
 mcp = FastMCP("tracker")
 
