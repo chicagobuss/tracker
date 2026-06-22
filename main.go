@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -63,9 +64,22 @@ func main() {
 
 	// Web UI (unauthenticated static assets; data fetches carry the bearer token).
 	webRoot, _ := fs.Sub(webFS, "web")
+	usageMD, _ := fs.ReadFile(webRoot, "usage.md")
+	serveUsage := func(w http.ResponseWriter) {
+		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+		_, _ = w.Write(usageMD)
+	}
 	mux.Handle("GET /static/", http.FileServerFS(webRoot))
+	mux.HandleFunc("GET /usage.md", func(w http.ResponseWriter, r *http.Request) { serveUsage(w) })
+	// Content-negotiate the root: browsers (Accept: text/html) get the JS UI;
+	// agents/curl get a readable markdown index instead of an unrenderable shell.
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFileFS(w, r, webRoot, "index.html")
+		wantsHTML := strings.Contains(r.Header.Get("Accept"), "text/html")
+		if wantsHTML && r.URL.Query().Get("format") != "md" {
+			http.ServeFileFS(w, r, webRoot, "index.html")
+			return
+		}
+		serveUsage(w)
 	})
 
 	authState := "DISABLED (no API_TOKENS)"

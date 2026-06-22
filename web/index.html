@@ -45,6 +45,11 @@
   <button id="help">? help</button>
   <button id="refresh">↻</button>
 </header>
+<noscript>
+  This is tracker's human web UI and needs JavaScript. Agents: use the JSON API
+  (e.g. GET /docs, GET /folios) or the spec at /openapi.yaml — or fetch this URL
+  with ?format=md for a readable markdown index. Don't scrape this HTML.
+</noscript>
 <main>
   <div id="list"></div>
   <div id="view"></div>
@@ -112,45 +117,18 @@ async function openDoc(id) {
 
 function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 
+// The help panel renders the same /usage.md the server gives non-browser clients,
+// so there's one source of truth for "how to use tracker".
 async function showHelp() {
   active = null; loadList();
   let version = "";
   try { version = (await (await api("/version")).json()).version; } catch {}
-  const base = location.origin;
-  $("#view").innerHTML = `<div class="md">
-<h1>tracker <span class="badge">${esc(version)}</span></h1>
-<p>A self-hosted coordination store for coding agents: a Postgres index of
-<b>documents</b> + content blobs in S3, with a lease-based "who's writing" lock and
-per-entity attribution. Base URL <code>${esc(base)}</code>.</p>
-
-<h2>Everything you need</h2>
-<ul>
-<li><b>Browse:</b> the left list is every document; click one to read it. Search filters by full text.</li>
-<li><b>Auth:</b> reads are open on a trusted network. If the server sets tokens, paste a bearer token above. Every <i>write</i> sends an <code>X-Actor</code> header naming who did it.</li>
-<li><b>Read via API:</b> <code>GET /docs?q=…</code> · <code>GET /docs/{id}</code> · <code>GET /docs/{id}/raw</code> (bytes).</li>
-<li><b>Write (the dance):</b> <code>POST /docs/{id}/lock</code> → get a <code>lease_token</code>; <code>PUT /docs/{id}</code> with headers <code>X-Actor</code>, <code>X-Lease-Token</code>, <code>If-Match: &lt;version&gt;</code>; then <code>DELETE /docs/{id}/lock</code>. Conflicts return <code>409</code> (held), <code>423</code> (no lease), <code>412</code> (stale version).</li>
-<li><b>Folios</b> (collections, like a gist): <code>GET /folios</code> · <code>POST /folios</code> · <code>POST /folios/{slug}/files</code> · <code>GET /folios/{slug}/files/{filename}</code>.</li>
-<li><b>Coordinate:</b> <code>GET /docs/{id}/lock</code> (who's editing) · <code>GET /actors</code> (who's active) · <code>/tasks</code> queue.</li>
-</ul>
-
-<h2>Response shapes</h2>
-<p>Single resource wrapped under its type (<code>{"document":…}</code>, <code>{"folio":…}</code>, <code>{"lock":…}</code>); lists carry <code>count/total/limit/offset</code>; errors are <code>{"error":{"code","message"}}</code>.</p>
-
-<h2>Reference</h2>
-<p>Full machine-readable spec: <a href="/openapi.yaml">/openapi.yaml</a> (OpenAPI 3.1).
-Agents use the <b>tracker MCP server</b> + skill. tracker documents itself in the
-<a href="#" id="open-tracker-folio">tracker folio</a>.</p>
-</div>`;
-  const t = document.getElementById("open-tracker-folio");
-  if (t) t.onclick = (e) => { e.preventDefault(); openFolio("tracker"); };
-}
-
-// Best-effort: open a folio's first file (used by the help link).
-async function openFolio(slug) {
-  try {
-    const { files } = await (await api("/folios/" + slug)).json();
-    if (files && files.length) openDoc(files[0].id);
-  } catch (e) { /* ignore */ }
+  let md = "";
+  try { md = await (await fetch("/usage.md")).text(); } catch {}
+  $("#view").innerHTML = `<div class="md">`
+    + `<p><span class="badge">${esc(version)}</span> <code>${esc(location.origin)}</code> · `
+    + `<a href="/openapi.yaml">openapi.yaml</a></p>`
+    + DOMPurify.sanitize(marked.parse(md)) + `</div>`;
 }
 
 $("#q").addEventListener("input", () => { clearTimeout(window._t); window._t = setTimeout(loadList, 200); });
