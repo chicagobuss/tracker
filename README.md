@@ -110,8 +110,35 @@ On a trusted (non-internet) network `X-Actor` is self-asserted attribution, not
 authenticated identity. Set `API_TOKENS` and bind actor→token if you need it to
 be tamper-proof.
 
+## Backup & restore
+
+State lives in two places that must be captured together: Postgres (the index)
+and the RustFS blobs (the content). One self-contained tarball holds both —
+`db.dump` + `blobs/` + `manifest.json`. That tarball is the portable unit;
+"R2 vs S3 vs a directory" is just where you keep it.
+
+```bash
+scripts/backup.sh                 # -> ./backups/tracker-backup-<ts>.tar.gz
+scripts/backup.sh --upload        # also push to R2/S3 (set BACKUP_S3_* in .env)
+
+scripts/restore.sh ./backups/tracker-backup-<ts>.tar.gz   # from a local file
+scripts/restore.sh --from-s3 tracker-backup-<ts>.tar.gz   # pull from R2/S3 first
+docker compose up -d tracker                               # then start the service
+```
+
+The backup dumps Postgres **first**, then copies blobs — and since writes are
+blob-first, every `content_key` in the dump is guaranteed to have its blob, so
+the tarball is always internally consistent. Restore is verified round-trip:
+restoring into a scratch DB+bucket reproduces the exact doc/blob counts and a
+tracker booted against it serves the content. `scripts/s3util.py` moves blobs and
+tarballs to any S3-compatible store (RustFS, AWS S3, Cloudflare R2).
+
+To restore on a **fresh machine**: clone the repo, create `.env` (point
+`S3_*`/`DATABASE_URL` at that host's RustFS+Postgres), `docker compose up -d
+postgres`, run `restore.sh`, then `docker compose up -d tracker`.
+
 ## Status
 
 v0 — smoke-tested end to end. Known follow-ups: pre-check lease/version before
 S3 upload (rejected writes currently leave GC-able orphan blobs); pgvector
-semantic search; MCP gateway; systemd unit; orphan/expired-lease GC.
+semantic search; scheduled backups (cron `backup.sh --upload`); orphan/expired-lease GC.
