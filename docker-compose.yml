@@ -24,7 +24,10 @@ services:
       retries: 10
 
   tracker:
-    build: .
+    build:
+      context: .
+      args:
+        VERSION: ${TRACKER_VERSION:-dev}
     image: tracker:local
     container_name: coord-tracker
     restart: unless-stopped

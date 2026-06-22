@@ -56,6 +56,10 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+func (s *Server) versionInfo(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"version": appVersion()})
+}
+
 // actor returns the entity performing a mutating request, from the required
 // X-Actor header. On a missing/blank value it writes a 400 and returns false,
 // so attribution is never anonymous.

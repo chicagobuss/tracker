@@ -28,13 +28,19 @@ echo "2/4  download blobs ($S3_BUCKET)"
 mkdir -p "$WORK/blobs"
 uv run --quiet scripts/s3util.py download-blobs "$WORK/blobs"
 
-# 3) Manifest for sanity-checking a restore.
+# 3) Manifest for sanity-checking a restore. binary_version is the version the
+#    LIVE service reports (the binary that produced this data); fall back to the
+#    repo's git version if the service isn't reachable.
 echo "3/4  manifest"
 DOCS=$(docker exec "$PG_CONTAINER" psql -U "$PGUSER" -d "$PGDATABASE" -tA -c "select count(*) from documents")
 BLOBS=$(find "$WORK/blobs" -type f | wc -l | tr -d ' ')
+HOST_ADDR=$(echo "$LISTEN_ADDR" | cut -d, -f1)
+BINVER=$(curl -s --max-time 3 "http://$HOST_ADDR/version" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p')
+[ -n "$BINVER" ] || BINVER=$(git describe --tags --always --dirty 2>/dev/null || echo unknown)
 cat > "$WORK/manifest.json" <<EOF
 {
   "created_at": "$(date -Iseconds)",
+  "binary_version": "$BINVER",
   "git_commit": "$(git rev-parse --short HEAD 2>/dev/null || echo unknown)",
   "documents": $DOCS,
   "blobs": $BLOBS,

@@ -28,6 +28,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", srv.health)
+	mux.HandleFunc("GET /version", srv.versionInfo)
 
 	mux.HandleFunc("POST /docs", srv.auth(srv.createDoc))
 	mux.HandleFunc("GET /docs", srv.auth(srv.listDocs))
@@ -72,7 +73,7 @@ func main() {
 		}
 		srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 		servers = append(servers, srv)
-		log.Printf("tracker listening on %s | bucket=%s | auth=%s", addr, cfg.S3Bucket, authState)
+		log.Printf("tracker %s listening on %s | bucket=%s | auth=%s", appVersion(), addr, cfg.S3Bucket, authState)
 		go func() {
 			if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 				log.Fatalf("serve %s: %v", addr, err)
