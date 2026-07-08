@@ -12,7 +12,10 @@ import (
 	"io"
 	"io/fs"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -33,21 +36,21 @@ var (
 )
 
 type Document struct {
-	ID          string    `json:"id"`
-	Slug        string    `json:"slug"`
-	Title       string    `json:"title"`
-	Kind        string    `json:"kind"`
-	ContentKey  string    `json:"content_key,omitempty"`
-	ContentHash string    `json:"content_hash,omitempty"`
-	ContentType string    `json:"content_type"`
+	ID          string          `json:"id"`
+	Slug        string          `json:"slug"`
+	Title       string          `json:"title"`
+	Kind        string          `json:"kind"`
+	ContentKey  string          `json:"content_key,omitempty"`
+	ContentHash string          `json:"content_hash,omitempty"`
+	ContentType string          `json:"content_type"`
 	SizeBytes   int64           `json:"size_bytes"`
 	Tags        []string        `json:"tags"`
 	Metadata    json.RawMessage `json:"metadata"`
 	Version     int             `json:"version"`
-	CreatedBy   string    `json:"created_by,omitempty"`
-	UpdatedBy   string    `json:"updated_by,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	CreatedBy   string          `json:"created_by,omitempty"`
+	UpdatedBy   string          `json:"updated_by,omitempty"`
+	CreatedAt   time.Time       `json:"created_at"`
+	UpdatedAt   time.Time       `json:"updated_at"`
 }
 
 type Lease struct {
@@ -60,10 +63,60 @@ type Lease struct {
 	ExpiresAt  time.Time `json:"expires_at"`
 }
 
-type Store struct {
-	db     *pgxpool.Pool
-	s3     *minio.Client
+type BlobStore interface {
+	PutObject(ctx context.Context, key string, data []byte, contentType string) error
+	GetObject(ctx context.Context, key string) (io.ReadCloser, error)
+	PresignGetObject(ctx context.Context, key string, ttl time.Duration) (string, error)
+}
+
+type S3BlobStore struct {
+	client *minio.Client
 	bucket string
+}
+
+func (s *S3BlobStore) PutObject(ctx context.Context, key string, data []byte, contentType string) error {
+	_, err := s.client.PutObject(ctx, s.bucket, key, bytes.NewReader(data), int64(len(data)),
+		minio.PutObjectOptions{ContentType: contentType})
+	return err
+}
+
+func (s *S3BlobStore) GetObject(ctx context.Context, key string) (io.ReadCloser, error) {
+	return s.client.GetObject(ctx, s.bucket, key, minio.GetObjectOptions{})
+}
+
+func (s *S3BlobStore) PresignGetObject(ctx context.Context, key string, ttl time.Duration) (string, error) {
+	u, err := s.client.PresignedGetObject(ctx, s.bucket, key, ttl, url.Values{})
+	if err != nil {
+		return "", err
+	}
+	return u.String(), nil
+}
+
+type LocalBlobStore struct {
+	blobDir string
+	baseURL string
+}
+
+func (l *LocalBlobStore) PutObject(ctx context.Context, key string, data []byte, contentType string) error {
+	path := filepath.Join(l.blobDir, key)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
+func (l *LocalBlobStore) GetObject(ctx context.Context, key string) (io.ReadCloser, error) {
+	return os.Open(filepath.Join(l.blobDir, key))
+}
+
+func (l *LocalBlobStore) PresignGetObject(ctx context.Context, key string, ttl time.Duration) (string, error) {
+	baseURL := strings.TrimRight(l.baseURL, "/")
+	return fmt.Sprintf("%s/blobs/%s", baseURL, key), nil
+}
+
+type Store struct {
+	db    *pgxpool.Pool
+	blobs BlobStore
 }
 
 func openStore(ctx context.Context, cfg Config) (*Store, error) {
@@ -75,24 +128,33 @@ func openStore(ctx context.Context, cfg Config) (*Store, error) {
 		return nil, fmt.Errorf("ping postgres: %w", err)
 	}
 
-	s3, err := minio.New(cfg.S3Endpoint, &minio.Options{
-		Creds:  credentials.NewStaticV4(cfg.S3AccessKey, cfg.S3SecretKey, ""),
-		Secure: cfg.S3UseSSL,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("init s3: %w", err)
-	}
-	exists, err := s3.BucketExists(ctx, cfg.S3Bucket)
-	if err != nil {
-		return nil, fmt.Errorf("check bucket: %w", err)
-	}
-	if !exists {
-		if err := s3.MakeBucket(ctx, cfg.S3Bucket, minio.MakeBucketOptions{}); err != nil {
-			return nil, fmt.Errorf("create bucket %q: %w", cfg.S3Bucket, err)
+	var blobs BlobStore
+	if cfg.StorageType == "file" {
+		blobs = &LocalBlobStore{
+			blobDir: cfg.BlobDir,
+			baseURL: cfg.BaseURL,
 		}
+	} else {
+		s3Client, err := minio.New(cfg.S3Endpoint, &minio.Options{
+			Creds:  credentials.NewStaticV4(cfg.S3AccessKey, cfg.S3SecretKey, ""),
+			Secure: cfg.S3UseSSL,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("init s3: %w", err)
+		}
+		exists, err := s3Client.BucketExists(ctx, cfg.S3Bucket)
+		if err != nil {
+			return nil, fmt.Errorf("check bucket: %w", err)
+		}
+		if !exists {
+			if err := s3Client.MakeBucket(ctx, cfg.S3Bucket, minio.MakeBucketOptions{}); err != nil {
+				return nil, fmt.Errorf("create bucket %q: %w", cfg.S3Bucket, err)
+			}
+		}
+		blobs = &S3BlobStore{client: s3Client, bucket: cfg.S3Bucket}
 	}
 
-	st := &Store{db: db, s3: s3, bucket: cfg.S3Bucket}
+	st := &Store{db: db, blobs: blobs}
 	if err := st.migrate(ctx); err != nil {
 		return nil, err
 	}
@@ -167,8 +229,7 @@ func (s *Store) CreateDocument(ctx context.Context, slug, title, kind string, ta
 	sum := sha256.Sum256(content)
 	hash := hex.EncodeToString(sum[:])
 	key := "sha256/" + hash
-	if _, err := s.s3.PutObject(ctx, s.bucket, key, bytes.NewReader(content), int64(len(content)),
-		minio.PutObjectOptions{ContentType: contentType}); err != nil {
+	if err := s.blobs.PutObject(ctx, key, content, contentType); err != nil {
 		return nil, fmt.Errorf("put blob: %w", err)
 	}
 
@@ -211,7 +272,13 @@ func (s *Store) GetDocument(ctx context.Context, idOrSlug string) (*Document, er
 
 // ListDocuments returns a page of documents matching the filters plus the total
 // match count (for pagination). limit defaults to 50 (cap 200) when <= 0.
-func (s *Store) ListDocuments(ctx context.Context, q, kind, tag string, limit, offset int) ([]Document, int, error) {
+//
+// mode selects the full-text query parser: "" / "web" uses websearch_to_tsquery
+// (understands quoted "phrases", OR, and -negation, like a search box); "plain"
+// (or "and") uses plainto_tsquery, which ANDs every term. When a query is
+// present, results are ranked by lexical relevance with a gentle recency decay
+// rather than strict recency.
+func (s *Store) ListDocuments(ctx context.Context, q, kind, tag, mode string, limit, offset int) ([]Document, int, error) {
 	if limit <= 0 {
 		limit = 50
 	}
@@ -221,7 +288,12 @@ func (s *Store) ListDocuments(ctx context.Context, q, kind, tag string, limit, o
 	if offset < 0 {
 		offset = 0
 	}
-	const filter = `where ($1 = '' or fts @@ plainto_tsquery('english', $1))
+
+	tsq := `websearch_to_tsquery('english', $1)`
+	if mode == "plain" || mode == "and" {
+		tsq = `plainto_tsquery('english', $1)`
+	}
+	filter := `where ($1 = '' or fts @@ ` + tsq + `)
 		  and ($2 = '' or kind = $2)
 		  and ($3 = '' or $3 = any(tags))`
 
@@ -229,8 +301,14 @@ func (s *Store) ListDocuments(ctx context.Context, q, kind, tag string, limit, o
 	if err := s.db.QueryRow(ctx, `select count(*) from documents `+filter, q, kind, tag).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	rows, err := s.db.Query(ctx, `select `+docSelect+` from documents `+filter+`
-		order by updated_at desc limit $4 offset $5`, q, kind, tag, limit, offset)
+
+	// Newest-first when browsing; relevance (with ~30-day recency e-fold) when searching.
+	order := `order by updated_at desc`
+	if q != "" {
+		order = `order by ts_rank(fts, ` + tsq + `) * exp(-extract(epoch from (now() - updated_at)) / 2592000.0) desc, updated_at desc`
+	}
+	rows, err := s.db.Query(ctx, `select `+docSelect+` from documents `+filter+` `+order+`
+		limit $4 offset $5`, q, kind, tag, limit, offset)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -244,6 +322,135 @@ func (s *Store) ListDocuments(ctx context.Context, q, kind, tag string, limit, o
 		out = append(out, *d)
 	}
 	return out, total, rows.Err()
+}
+
+// DocPatch carries label-only changes: tags and metadata (and optionally title).
+// These are NOT content, so applying them never bumps the version, rewrites a
+// blob, or requires a lease.
+type DocPatch struct {
+	Tags       []string        // full replacement of the tag set when non-nil
+	AddTags    []string        // tags to add (set union)
+	RemoveTags []string        // tags to drop
+	Metadata   json.RawMessage // shallow-merged into existing metadata when non-nil
+	Title      *string         // replaces the title when non-nil
+}
+
+// PatchDocument mutates a document's labels (tags / metadata / title) without
+// touching its content. Deliberately does not bump version, rewrite the blob, or
+// require a lease — tags and metadata are labels, not content. (fts is left as-is;
+// a changed title reindexes on the next content write.) Requires only an actor
+// for attribution.
+func (s *Store) PatchDocument(ctx context.Context, idOrSlug string, p DocPatch, by string) (*Document, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	var id, title string
+	var tags []string
+	var meta json.RawMessage
+	err = tx.QueryRow(ctx, `select id, title, tags, metadata from documents where `+idClause+` for update`, idOrSlug).
+		Scan(&id, &title, &tags, &meta)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	} else if err != nil {
+		return nil, err
+	}
+
+	if p.Tags != nil { // explicit full replace wins
+		tags = p.Tags
+	}
+	tags = removeTags(tags, p.RemoveTags)
+	tags = addTags(tags, p.AddTags)
+	if tags == nil {
+		tags = []string{}
+	}
+	if len(p.Metadata) > 0 {
+		meta = withMeta(meta, rawToMap(p.Metadata))
+	}
+	if p.Title != nil {
+		title = *p.Title
+	}
+
+	row := tx.QueryRow(ctx, `
+		update documents set tags = $2, metadata = $3::jsonb, title = $4,
+			updated_by = $5, updated_at = now()
+		where id = $1
+		returning `+docSelect, id, tags, string(meta), title, by)
+	doc, err := scanDoc(row)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	s.touchActor(ctx, by)
+	return doc, nil
+}
+
+func addTags(cur, add []string) []string {
+	seen := map[string]bool{}
+	for _, t := range cur {
+		seen[t] = true
+	}
+	for _, t := range add {
+		if t != "" && !seen[t] {
+			cur = append(cur, t)
+			seen[t] = true
+		}
+	}
+	return cur
+}
+
+func removeTags(cur, rm []string) []string {
+	if len(rm) == 0 {
+		return cur
+	}
+	drop := map[string]bool{}
+	for _, t := range rm {
+		drop[t] = true
+	}
+	out := make([]string, 0, len(cur))
+	for _, t := range cur {
+		if !drop[t] {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func rawToMap(raw json.RawMessage) map[string]any {
+	m := map[string]any{}
+	_ = json.Unmarshal(raw, &m)
+	return m
+}
+
+// TagCount is one distinct tag and how many documents carry it.
+type TagCount struct {
+	Tag   string `json:"tag"`
+	Count int    `json:"count"`
+}
+
+// ListTags enumerates the whole tag vocabulary with usage counts, so an agent
+// can discover what tags exist without pulling every document.
+func (s *Store) ListTags(ctx context.Context) ([]TagCount, error) {
+	rows, err := s.db.Query(ctx, `
+		select t, count(*) from documents, unnest(tags) as t
+		group by t order by count(*) desc, t`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []TagCount{}
+	for rows.Next() {
+		var tc TagCount
+		if err := rows.Scan(&tc.Tag, &tc.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, tc)
+	}
+	return out, rows.Err()
 }
 
 // AcquireLease acquires, renews (when leaseToken matches the live holder), or
@@ -357,8 +564,7 @@ func (s *Store) WriteContent(ctx context.Context, docID, owner, leaseToken strin
 
 	// Upload first; blobs are immutable and content-addressed, so a re-PUT of the
 	// same bytes is harmless and a failed DB step only leaves a GC-able orphan.
-	_, err := s.s3.PutObject(ctx, s.bucket, key, bytes.NewReader(data), int64(len(data)),
-		minio.PutObjectOptions{ContentType: contentType})
+	err := s.blobs.PutObject(ctx, key, data, contentType)
 	if err != nil {
 		return nil, fmt.Errorf("put blob: %w", err)
 	}
@@ -417,20 +623,62 @@ func (s *Store) WriteContent(ctx context.Context, docID, owner, leaseToken strin
 	return doc, nil
 }
 
-// GetContent streams an object's bytes from RustFS. Used by the web UI so the
+// GetContent streams an object's bytes. Used by the web UI so the
 // browser can fetch content same-origin (agents should prefer PresignGet).
 func (s *Store) GetContent(ctx context.Context, contentKey string) (io.ReadCloser, error) {
-	return s.s3.GetObject(ctx, s.bucket, contentKey, minio.GetObjectOptions{})
+	return s.blobs.GetObject(ctx, contentKey)
 }
 
 // PresignGet returns a time-limited URL the agent can use to fetch content
-// bytes straight from RustFS without proxying through this service.
 func (s *Store) PresignGet(ctx context.Context, contentKey string, ttl time.Duration) (string, error) {
-	u, err := s.s3.PresignedGetObject(ctx, s.bucket, contentKey, ttl, url.Values{})
+	return s.blobs.PresignGetObject(ctx, contentKey, ttl)
+}
+
+// --- revisions (immutable per-version history) ---
+
+// Revision is one entry in a document's version history. Old content blobs are
+// retained (content-addressed), so any past version stays fetchable.
+type Revision struct {
+	Version     int       `json:"version"`
+	ContentHash string    `json:"content_hash"`
+	SizeBytes   int64     `json:"size_bytes"`
+	Author      string    `json:"author"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+// DocRevisions lists a document's versions newest-first.
+func (s *Store) DocRevisions(ctx context.Context, idOrSlug string) ([]Revision, error) {
+	rows, err := s.db.Query(ctx, `
+		select r.version, r.content_hash, r.size_bytes, coalesce(r.author,''), r.created_at
+		from document_revisions r join documents d on d.id = r.document_id
+		where (d.id::text = $1 or d.slug = $1)
+		order by r.version desc`, idOrSlug)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return u.String(), nil
+	defer rows.Close()
+	out := []Revision{}
+	for rows.Next() {
+		var rv Revision
+		if err := rows.Scan(&rv.Version, &rv.ContentHash, &rv.SizeBytes, &rv.Author, &rv.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, rv)
+	}
+	return out, rows.Err()
+}
+
+// RevisionContent returns the blob key + content type for a specific past version,
+// so its bytes can be streamed from the retained content-addressed store.
+func (s *Store) RevisionContent(ctx context.Context, idOrSlug string, version int) (key, contentType string, err error) {
+	err = s.db.QueryRow(ctx, `
+		select r.content_key, d.content_type
+		from document_revisions r join documents d on d.id = r.document_id
+		where (d.id::text = $1 or d.slug = $1) and r.version = $2`, idOrSlug, version).Scan(&key, &contentType)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", ErrNotFound
+	}
+	return key, contentType, err
 }
 
 // --- actors (entity registry) ---

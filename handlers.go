@@ -3,7 +3,9 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -114,6 +116,74 @@ func withMeta(raw json.RawMessage, add map[string]any) json.RawMessage {
 	return b
 }
 
+// docID reads the document id/slug from the route, accepting both the single
+// segment {id} and the multi-segment {rest...} wildcard (so folio-file slugs like
+// "myfolio/file.md", which contain a '/', resolve at /docs/...).
+func docID(r *http.Request) string {
+	if id := r.PathValue("id"); id != "" {
+		return id
+	}
+	return r.PathValue("rest")
+}
+
+// --- list views (the agent plane: token-shaped projections of a doc list) ---
+//
+// view=summary (default) trims each doc to the fields you browse by; view=table
+// is a columnar {cols, rows} shape that emits each key once instead of per row
+// (≈10× smaller for a big list); view=full returns whole Document objects.
+
+var tableCols = []string{"slug", "title", "kind", "tags", "kb", "v", "age"}
+
+func kb(b int64) float64 { return math.Round(float64(b)/1024.0*10) / 10 }
+
+// age renders a compact relative timestamp ("5h", "2d") for the dense table view.
+func age(t time.Time) string {
+	d := time.Since(t)
+	switch {
+	case d < time.Minute:
+		return "now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
+}
+
+func summaryView(docs []Document) []map[string]any {
+	out := make([]map[string]any, len(docs))
+	for i, d := range docs {
+		out[i] = map[string]any{
+			"id": d.ID, "slug": d.Slug, "title": d.Title, "kind": d.Kind,
+			"tags": d.Tags, "size_bytes": d.SizeBytes, "version": d.Version,
+			"updated_at": d.UpdatedAt,
+		}
+	}
+	return out
+}
+
+func tableView(docs []Document) map[string]any {
+	rows := make([][]any, len(docs))
+	for i, d := range docs {
+		rows[i] = []any{d.Slug, d.Title, d.Kind, strings.Join(d.Tags, ","), kb(d.SizeBytes), d.Version, age(d.UpdatedAt)}
+	}
+	return map[string]any{"cols": tableCols, "rows": rows}
+}
+
+// listView renders docs according to ?view, using listKey ("documents"/"folios"/
+// "files") for the object-bearing modes. The caller adds count/total/paging.
+func listView(r *http.Request, listKey string, docs []Document) map[string]any {
+	switch r.URL.Query().Get("view") {
+	case "full":
+		return map[string]any{listKey: docs}
+	case "table":
+		return tableView(docs)
+	default: // summary
+		return map[string]any{listKey: summaryView(docs)}
+	}
+}
+
 // docEnvelope is the canonical single-document response: the document plus a
 // short-lived content URL and live lock state (null when unlocked).
 func (s *Server) docEnvelope(r *http.Request, doc *Document) map[string]any {
@@ -164,23 +234,73 @@ func (s *Server) createDoc(w http.ResponseWriter, r *http.Request) {
 func (s *Server) listDocs(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	limit, offset := pageParams(r)
-	docs, total, err := s.store.ListDocuments(r.Context(), q.Get("q"), q.Get("kind"), q.Get("tag"), limit, offset)
+	query := q.Get("q")
+	docs, total, err := s.store.ListDocuments(r.Context(), query, q.Get("kind"), q.Get("tag"), q.Get("mode"), limit, offset)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"documents": docs, "count": len(docs), "total": total, "limit": limit, "offset": offset,
-	})
+	resp := listView(r, "documents", docs)
+	resp["count"], resp["total"], resp["limit"], resp["offset"] = len(docs), total, limit, offset
+	// Don't let a silently-AND'd multi-word query look like an empty store.
+	if total == 0 && len(strings.Fields(query)) > 1 && q.Get("mode") != "plain" {
+		resp["hint"] = `0 results — multi-word queries match ALL terms by default. Try fewer words, "a quoted phrase", or "a OR b".`
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) getDoc(w http.ResponseWriter, r *http.Request) {
-	doc, err := s.store.GetDocument(r.Context(), r.PathValue("id"))
+	doc, err := s.store.GetDocument(r.Context(), docID(r))
+	if errors.Is(err, ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found", "no document with that id or slug",
+			map[string]any{"hint": "folio files are addressable by full slug (/docs/myfolio/file.md) or at /folios/{slug}/files/{filename}"})
+		return
+	}
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, s.docEnvelope(r, doc))
+}
+
+// patchDoc mutates labels only — tags and/or metadata (and optionally title) —
+// without rewriting content. No lease and no version bump: tags/metadata are
+// labels, not content. Requires X-Actor for attribution.
+func (s *Server) patchDoc(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.actor(w, r)
+	if !ok {
+		return
+	}
+	var in struct {
+		Tags       []string        `json:"tags"`
+		AddTags    []string        `json:"add_tags"`
+		RemoveTags []string        `json:"remove_tags"`
+		Metadata   json.RawMessage `json:"metadata"`
+		Title      *string         `json:"title"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		badRequest(w, "json body required (tags / add_tags / remove_tags / metadata / title)")
+		return
+	}
+	doc, err := s.store.PatchDocument(r.Context(), docID(r), DocPatch{
+		Tags: in.Tags, AddTags: in.AddTags, RemoveTags: in.RemoveTags,
+		Metadata: in.Metadata, Title: in.Title,
+	}, actor)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.docEnvelope(r, doc))
+}
+
+// listTags returns the whole tag vocabulary with counts.
+func (s *Server) listTags(w http.ResponseWriter, r *http.Request) {
+	tags, err := s.store.ListTags(r.Context())
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tags": tags, "count": len(tags)})
 }
 
 // putDoc writes content. Headers: X-Actor (must hold the lease), X-Lease-Token,
@@ -238,17 +358,55 @@ func (s *Server) streamContent(w http.ResponseWriter, r *http.Request, idOrSlug 
 	_, _ = io.Copy(w, rc)
 }
 
+// listRevisions returns a document's version history (newest first).
+func (s *Server) listRevisions(w http.ResponseWriter, r *http.Request) {
+	revs, err := s.store.DocRevisions(r.Context(), docID(r))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"revisions": revs, "count": len(revs)})
+}
+
+// rawRevision streams the content bytes of a specific past version.
+func (s *Server) rawRevision(w http.ResponseWriter, r *http.Request) {
+	version, err := strconv.Atoi(r.PathValue("version"))
+	if err != nil {
+		badRequest(w, "version must be an integer")
+		return
+	}
+	key, ctype, err := s.store.RevisionContent(r.Context(), docID(r), version)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if key == "" {
+		writeError(w, http.StatusNotFound, "no_content", "that revision has no content", nil)
+		return
+	}
+	rc, err := s.store.GetContent(r.Context(), key)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	defer rc.Close()
+	w.Header().Set("Content-Type", ctype)
+	_, _ = io.Copy(w, rc)
+}
+
 // --- folios (collections; a folio is a kind=folio doc, members carry folio:<slug>) ---
 
 func folioTag(slug string) string { return "folio:" + slug }
 
 func (s *Server) listFolios(w http.ResponseWriter, r *http.Request) {
-	folios, total, err := s.store.ListDocuments(r.Context(), "", "folio", "", 500, 0)
+	folios, total, err := s.store.ListDocuments(r.Context(), "", "folio", "", "", 500, 0)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"folios": folios, "count": len(folios), "total": total})
+	resp := listView(r, "folios", folios)
+	resp["count"], resp["total"] = len(folios), total
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) createFolio(w http.ResponseWriter, r *http.Request) {
@@ -285,12 +443,14 @@ func (s *Server) getFolio(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	files, total, err := s.store.ListDocuments(r.Context(), "", "", folioTag(folio.Slug), 500, 0)
+	files, total, err := s.store.ListDocuments(r.Context(), "", "", folioTag(folio.Slug), "", 500, 0)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"folio": folio, "files": files, "count": len(files), "total": total})
+	resp := listView(r, "files", files)
+	resp["folio"], resp["count"], resp["total"] = folio, len(files), total
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // createFolioFile adds a document to a folio, applying the folio: tag and the

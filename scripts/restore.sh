@@ -6,8 +6,8 @@
 #   scripts/restore.sh --from-s3 tracker-backup-<ts>.tar.gz
 #   scripts/restore.sh <tarball> --db NAME --bucket NAME   # restore into scratch
 #
-# Restores Postgres + uploads blobs to the content store. If restoring OVER the
-# live database, stop the tracker container first (`docker compose stop tracker`).
+# Restores Postgres + uploads blobs to the content store (or local directory). If
+# restoring OVER the live database, stop the tracker container first.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 set -a; . ./.env; set +a
@@ -48,12 +48,19 @@ echo "3/5  pg_restore -> $DB"
 docker exec -i "$PG_CONTAINER" pg_restore -U "$PGUSER" -d "$DB" --clean --if-exists --no-owner < "$WORK/db.dump" 2>&1 \
   | grep -vE 'does not exist, skipping|errors ignored on restore' || true
 
-echo "4/5  upload blobs -> $BUCKET"
-S3_BUCKET="$BUCKET" uv run --quiet scripts/s3util.py upload-blobs "$WORK/blobs"
+echo "4/5  restoring blobs"
+if [ "${STORAGE_TYPE:-file}" = "file" ]; then
+  echo "     copying to local directory ${BLOB_DIR:-./data/blobs}"
+  mkdir -p "${BLOB_DIR:-./data/blobs}"
+  cp -a "$WORK/blobs/." "${BLOB_DIR:-./data/blobs}/"
+else
+  echo "     upload blobs -> $BUCKET"
+  S3_BUCKET="$BUCKET" uv run --quiet scripts/s3util.py upload-blobs "$WORK/blobs"
+fi
 
 echo "5/5  clear stale leases"
 docker exec "$PG_CONTAINER" psql -U "$PGUSER" -d "$DB" -tAc "delete from doc_locks;" >/dev/null 2>&1 || true
 
 DOCS=$(docker exec "$PG_CONTAINER" psql -U "$PGUSER" -d "$DB" -tAc "select count(*) from documents")
-echo "restore complete: db=$DB ($DOCS docs), bucket=$BUCKET"
-echo "  -> start the service: docker compose up -d tracker (with .env pointing at this db/bucket)"
+echo "restore complete: db=$DB ($DOCS docs), storage=${STORAGE_TYPE:-file}"
+echo "  -> start the service: docker compose up -d tracker (with .env pointing at this db/storage)"

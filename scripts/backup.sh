@@ -24,9 +24,15 @@ docker exec "$PG_CONTAINER" pg_dump -U "$PGUSER" -d "$PGDATABASE" -Fc > "$WORK/d
 
 # 2) Then the blobs (immutable + content-addressed, so copying after the dump is
 #    guaranteed to include everything the dump references).
-echo "2/4  download blobs ($S3_BUCKET)"
+echo "2/4  copying blobs"
 mkdir -p "$WORK/blobs"
-uv run --quiet scripts/s3util.py download-blobs "$WORK/blobs"
+if [ "${STORAGE_TYPE:-file}" = "file" ]; then
+  if [ -d "${BLOB_DIR:-./data/blobs}" ]; then
+    cp -a "${BLOB_DIR:-./data/blobs}/." "$WORK/blobs/"
+  fi
+else
+  uv run --quiet scripts/s3util.py download-blobs "$WORK/blobs"
+fi
 
 # 3) Manifest for sanity-checking a restore. binary_version is the version the
 #    LIVE service reports (the binary that produced this data); fall back to the
@@ -45,7 +51,8 @@ cat > "$WORK/manifest.json" <<EOF
   "documents": $DOCS,
   "blobs": $BLOBS,
   "pg_dump_format": "custom",
-  "content_bucket": "$S3_BUCKET"
+  "storage_type": "${STORAGE_TYPE:-file}",
+  "content_bucket": "${S3_BUCKET:-local}"
 }
 EOF
 

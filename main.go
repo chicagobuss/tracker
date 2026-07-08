@@ -40,9 +40,18 @@ func main() {
 
 	mux.HandleFunc("POST /docs", srv.auth(srv.createDoc))
 	mux.HandleFunc("GET /docs", srv.auth(srv.listDocs))
+	mux.HandleFunc("GET /tags", srv.auth(srv.listTags))
 	mux.HandleFunc("GET /docs/{id}", srv.auth(srv.getDoc))
+	// Trailing-wildcard read so multi-segment folio-file slugs (e.g. myfolio/file.md)
+	// resolve too; the single-segment {id} pattern is more specific and still wins.
+	mux.HandleFunc("GET /docs/{rest...}", srv.auth(srv.getDoc))
 	mux.HandleFunc("GET /docs/{id}/raw", srv.auth(srv.rawDoc))
+	mux.HandleFunc("GET /docs/{id}/revisions", srv.auth(srv.listRevisions))
+	mux.HandleFunc("GET /docs/{id}/revisions/{version}/raw", srv.auth(srv.rawRevision))
 	mux.HandleFunc("PUT /docs/{id}", srv.auth(srv.putDoc))
+	mux.HandleFunc("PATCH /docs/{id}", srv.auth(srv.patchDoc))
+	// Relabel by full slug too — every folio file's slug is multi-segment.
+	mux.HandleFunc("PATCH /docs/{rest...}", srv.auth(srv.patchDoc))
 
 	mux.HandleFunc("POST /docs/{id}/lock", srv.auth(srv.acquireLock))
 	mux.HandleFunc("GET /docs/{id}/lock", srv.auth(srv.getLock))
@@ -62,6 +71,17 @@ func main() {
 	mux.HandleFunc("GET /folios/{slug}/files/{filename}", srv.auth(srv.getFolioFile))
 	mux.HandleFunc("GET /folios/{slug}/files/{filename}/raw", srv.auth(srv.rawFolioFile))
 
+	if cfg.StorageType == "file" {
+		blobHandler := http.StripPrefix("/blobs/", http.FileServer(http.Dir(cfg.BlobDir)))
+		mux.HandleFunc("GET /blobs/", func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "/") {
+				http.NotFound(w, r)
+				return
+			}
+			blobHandler.ServeHTTP(w, r)
+		})
+	}
+
 	// Web UI (unauthenticated static assets; data fetches carry the bearer token).
 	webRoot, _ := fs.Sub(webFS, "web")
 	usageMD, _ := fs.ReadFile(webRoot, "usage.md")
@@ -71,6 +91,8 @@ func main() {
 	}
 	mux.Handle("GET /static/", http.FileServerFS(webRoot))
 	mux.HandleFunc("GET /usage.md", func(w http.ResponseWriter, r *http.Request) { serveUsage(w) })
+	// llms.txt convention: a single model-readable doc that orients an agent.
+	mux.HandleFunc("GET /llms.txt", func(w http.ResponseWriter, r *http.Request) { serveUsage(w) })
 	// Content-negotiate the root: browsers (Accept: text/html) get the JS UI;
 	// agents/curl get a readable markdown index instead of an unrenderable shell.
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {

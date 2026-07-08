@@ -67,24 +67,45 @@ def _client() -> httpx.Client:
 # --- reads ---
 
 @mcp.tool()
-def search_docs(query: str = "", kind: str = "", tag: str = "") -> dict:
-    """Search/list documents. `query` does full-text search; filter by `kind`
-    (e.g. note, spec, folio) and/or a `tag`. Returns metadata, not content."""
+def search_docs(query: str = "", kind: str = "", tag: str = "", limit: int = 50) -> dict:
+    """Search/list documents. `query` is a full-text search (understands quoted
+    "phrases", OR, and -negation; bare words must ALL match). Filter by `kind`
+    (note, spec, folio) and/or an exact `tag` (e.g. folio:tracker, topic:zpq).
+    Returns a compact table — `cols` names the columns, `rows` are the values
+    (address a doc by its `slug`); read content with read_doc. `hint` appears
+    when a query matched nothing."""
     with _client() as c:
-        r = c.get("/docs", params={"q": query, "kind": kind, "tag": tag})
+        r = c.get("/docs", params={"q": query, "kind": kind, "tag": tag,
+                                   "view": "table", "limit": limit})
         r.raise_for_status()
-        docs = r.json()["documents"]
-        return {"count": len(docs), "documents": docs}
+        d = r.json()
+        out = {"count": d["count"], "total": d["total"],
+               "cols": d.get("cols"), "rows": d.get("rows")}
+        if d.get("hint"):
+            out["hint"] = d["hint"]
+        return out
 
 
 @mcp.tool()
 def list_folios() -> dict:
-    """List all folios (collections of related documents, like gists)."""
+    """List all folios (collections of related documents, like gists). Returns a
+    compact table (`cols`/`rows`); address a folio by its `slug`."""
     with _client() as c:
-        r = c.get("/folios")
+        r = c.get("/folios", params={"view": "table"})
         r.raise_for_status()
-        folios = r.json()["folios"]
-        return {"count": len(folios), "folios": folios}
+        d = r.json()
+        return {"count": d["count"], "cols": d.get("cols"), "rows": d.get("rows")}
+
+
+@mcp.tool()
+def list_tags() -> dict:
+    """List the whole tag vocabulary with usage counts, so you can discover what
+    tags exist (e.g. folio:*, topic:*, kind:*) without reading every document."""
+    with _client() as c:
+        r = c.get("/tags")
+        r.raise_for_status()
+        d = r.json()
+        return {"count": d["count"], "tags": d["tags"]}
 
 
 @mcp.tool()
@@ -148,6 +169,26 @@ def create_doc(slug: str, title: str = "", kind: str = "note", content: str = ""
         else:
             r = c.post("/docs", json={"slug": slug, "title": title or slug, "kind": kind,
                                       "tags": tags or [], "content": content})
+        r.raise_for_status()
+        return r.json().get("document", r.json())
+
+
+@mcp.tool()
+def retag(id_or_slug: str, add_tags: list[str] | None = None,
+          remove_tags: list[str] | None = None, metadata: dict | None = None) -> dict:
+    """Change a document's tags and/or metadata WITHOUT rewriting its content.
+    No lease needed and the version is unchanged — tags/metadata are labels, not
+    content. Use namespaced tags (topic:zpq, kind:agent-reply, status:draft).
+    `add_tags`/`remove_tags` adjust the set; `metadata` is shallow-merged."""
+    body: dict = {}
+    if add_tags:
+        body["add_tags"] = add_tags
+    if remove_tags:
+        body["remove_tags"] = remove_tags
+    if metadata is not None:
+        body["metadata"] = metadata
+    with httpx.Client(base_url=BASE, timeout=30, headers=_headers(mutating=True)) as c:
+        r = c.patch(f"/docs/{id_or_slug}", json=body)
         r.raise_for_status()
         return r.json().get("document", r.json())
 

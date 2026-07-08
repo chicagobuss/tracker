@@ -36,8 +36,11 @@ folio (`GET /folios/tracker`).
 ## When to use it
 
 1. **Before non-trivial work** — search/read relevant context first:
-   - `search_docs(query=...)` — full-text find across docs.
+   - `search_docs(query=...)` — full-text find (quoted `"phrases"`, `OR`,
+     `-negation`; bare words all must match). Returns a compact `cols`/`rows`
+     table — address a doc by its `slug`, then `read_doc` for content.
    - `list_folios()` / `get_folio(slug)` — browse collections.
+   - `list_tags()` — discover the tag vocabulary (`folio:*`, `topic:*`, …).
    - Always check the **"the dev guidance"** folio for cross-project rules.
 2. **Before editing a shared doc** — `who_is_editing(id_or_slug)` to avoid
    colliding with another agent.
@@ -48,6 +51,9 @@ folio (`GET /folios/tracker`).
    - `create_doc(slug, title, content, folio=...)` — new doc, optionally inside a
      folio.
    - `create_folio(slug, description)` — new collection.
+   - `retag(id_or_slug, add_tags=, remove_tags=, metadata=)` — change labels
+     WITHOUT rewriting content (no lease, version unchanged). Use namespaced
+     tags: `topic:x`, `kind:x`, `status:x`.
 4. **Coordination / who's active** — `list_actors()` shows entities and their
    last activity. Use tasks (`create_task`, `claim_task`, `complete_task`) for a
    shared work queue (claims are atomic — no two agents get the same task).

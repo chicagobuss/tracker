@@ -138,24 +138,29 @@ paths:
     get:
       summary: List / full-text search documents
       parameters:
-        - { name: q, in: query, schema: { type: string }, description: full-text query }
+        - { name: q, in: query, schema: { type: string }, description: "full-text query (see mode)" }
+        - { name: mode, in: query, schema: { type: string, enum: [web, plain], default: web }, description: "web = websearch_to_tsquery (quoted phrases, OR, -negation); plain = strict AND" }
         - { name: kind, in: query, schema: { type: string } }
-        - { name: tag, in: query, schema: { type: string } }
+        - { name: tag, in: query, schema: { type: string }, description: "exact tag match, e.g. folio:tracker" }
+        - { name: view, in: query, schema: { type: string, enum: [summary, table, full], default: summary }, description: "summary = trimmed objects; table = columnar {cols,rows}; full = whole Documents" }
         - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 200 } }
         - { name: offset, in: query, schema: { type: integer, default: 0 } }
       responses:
         "200":
-          description: a page of documents
+          description: "a page of documents; shape depends on view"
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  documents: { type: array, items: { $ref: '#/components/schemas/Document' } }
+                  documents: { type: array, items: { $ref: '#/components/schemas/Document' }, description: "view=summary|full (trimmed or whole objects)" }
+                  cols: { type: array, items: { type: string }, description: "view=table column names" }
+                  rows: { type: array, items: { type: array }, description: "view=table row values, positional to cols" }
                   count: { type: integer }
                   total: { type: integer }
                   limit: { type: integer }
                   offset: { type: integer }
+                  hint: { type: string, description: "present when a query matched nothing" }
     post:
       summary: Create a document
       parameters: [ { $ref: '#/components/parameters/Actor' } ]
@@ -178,8 +183,22 @@ paths:
         "201": { description: created, content: { application/json: { schema: { type: object, properties: { document: { $ref: '#/components/schemas/Document' } } } } } }
         "400": { $ref: '#/components/responses/BadRequest' }
 
+  /tags:
+    get:
+      summary: List the tag vocabulary with usage counts
+      responses:
+        "200":
+          description: distinct tags and how many documents carry each
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tags: { type: array, items: { type: object, properties: { tag: { type: string }, count: { type: integer } } } }
+                  count: { type: integer }
+
   /docs/{id}:
-    parameters: [ { name: id, in: path, required: true, schema: { type: string }, description: "UUID or single-segment slug" } ]
+    parameters: [ { name: id, in: path, required: true, schema: { type: string }, description: "UUID or slug (multi-segment folio slugs like myfolio/file.md resolve too)" } ]
     get:
       summary: Get a document (metadata + content URL + live lock)
       responses:
@@ -205,6 +224,25 @@ paths:
         "200": { description: written, content: { application/json: { schema: { type: object, properties: { document: { $ref: '#/components/schemas/Document' } } } } } }
         "412": { description: "version_conflict", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
         "423": { description: "no_lease (you don't hold the lease)", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    patch:
+      summary: Relabel — change tags/metadata/title without rewriting content
+      description: "Labels are not content: no lease, no content rewrite, no version bump. Requires only X-Actor for attribution."
+      parameters: [ { $ref: '#/components/parameters/Actor' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                add_tags: { type: array, items: { type: string }, description: "tags to add (set union)" }
+                remove_tags: { type: array, items: { type: string }, description: "tags to drop" }
+                tags: { type: array, items: { type: string }, description: "replace the whole tag set" }
+                metadata: { type: object, description: "shallow-merged into existing metadata" }
+                title: { type: string }
+      responses:
+        "200": { description: relabelled, content: { application/json: { schema: { type: object, properties: { document: { $ref: '#/components/schemas/Document' } } } } } }
+        "404": { $ref: '#/components/responses/NotFound' }
 
   /docs/{id}/raw:
     get:

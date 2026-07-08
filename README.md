@@ -1,8 +1,8 @@
 # tracker
 
 A tiny coordination store for a fleet of coding agents. Postgres holds the
-index + lease/coordination state; content blobs live in RustFS (S3). Single
-static Go binary, low footprint, reachable by agents over the network
+index + lease/coordination state; content blobs live in local files or RustFS (S3).
+Single static Go binary, low footprint, reachable by agents over the network
 (e.g. ZeroTier).
 
 ## Agents: MCP server + skill
@@ -40,9 +40,9 @@ knowledge-app problem — so: Postgres + S3, not Anytype.
 - **Two-layer write safety.** A write requires (a) a live lease the caller holds
   (`X-Lease-Token`) and (b) `If-Match: <version>` optimistic concurrency, so a
   stale or lease-less write can't clobber.
-- **Content-addressed blobs.** Bytes are stored in RustFS under `sha256/<hash>`
-  (immutable, deduped); agents fetch them via a presigned URL rather than
-  proxying through the API.
+- **Content-addressed blobs.** Bytes are stored under `sha256/<hash>`
+  (immutable, deduped) in either a local directory (`STORAGE_TYPE=file`) or an S3 bucket
+  (`STORAGE_TYPE=s3`). Agents fetch them via a presigned URL or direct local URL.
 - **Task queue.** `tasks` with `FOR UPDATE SKIP LOCKED` claiming — no two agents
   grab the same task.
 
@@ -50,10 +50,10 @@ knowledge-app problem — so: Postgres + S3, not Anytype.
 
 Both Postgres and the service run via Docker Compose (no sudo needed). The
 `tracker` container uses host networking, so it binds the loopback/LAN/ZeroTier
-IPs in `LISTEN_ADDR` and reaches Postgres + RustFS on the host.
+IPs in `LISTEN_ADDR` and reaches Postgres (and optionally S3) on the host.
 
 ```bash
-cp .env.example .env          # fill in secrets + set API_TOKENS before exposing
+cp .env.example .env          # fill in secrets (e.g. STORAGE_TYPE=file) + set API_TOKENS
 docker compose up -d          # starts pgvector Postgres + tracker
 ```
 
@@ -129,9 +129,9 @@ be tamper-proof.
 ## Backup & restore
 
 State lives in two places that must be captured together: Postgres (the index)
-and the RustFS blobs (the content). One self-contained tarball holds both —
+and the blobs (the content). One self-contained tarball holds both —
 `db.dump` + `blobs/` + `manifest.json`. That tarball is the portable unit;
-"R2 vs S3 vs a directory" is just where you keep it.
+"R2 vs S3 vs a local directory" is just where you keep it.
 
 ```bash
 scripts/backup.sh                 # -> ./backups/tracker-backup-<ts>.tar.gz

@@ -8,3 +8,7 @@ pgdata/
 *.log
 .serena/
 backups/
+
+# python bytecode
+__pycache__/
+*.pyc

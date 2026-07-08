@@ -18,7 +18,45 @@
   button { background:#222733; color:var(--fg); border:1px solid var(--border); border-radius:6px; padding:.35rem .6rem; cursor:pointer; }
   button:hover { background:#2b3240; }
   main { flex:1; display:flex; min-height:0; }
-  #list { width:300px; border-right:1px solid var(--border); overflow:auto; background:var(--panel); }
+  #sidebar { width:300px; border-right:1px solid var(--border); display:flex; flex-direction:column; background:var(--panel); }
+  #filter-container {
+    padding: .55rem .7rem;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: .4rem;
+  }
+  #filter { width:100%; background:#0c0e12; border:1px solid var(--border); color:var(--fg); border-radius:6px; padding:.35rem .5rem; font-size:13px; }
+  .sort-controls {
+    display: flex;
+    gap: .4rem;
+    align-items: center;
+  }
+  .sort-btn-group {
+    display: flex;
+    gap: 2px;
+    flex: 1;
+  }
+  .sort-toggle {
+    flex: 1;
+    width: auto !important;
+  }
+  #sort-dir {
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 0 2px 0;
+    font-size: 13px;
+    border-radius: 6px;
+    line-height: 1;
+    background: #0c0e12;
+    border: 1px solid var(--border);
+  }
+  #filter:focus { outline:none; border-color:var(--accent); }
+  #list { flex:1; overflow:auto; }
+  mark.highlight { background:rgba(110, 168, 254, 0.25); color:#9ec5fe; border-radius:2px; padding:0 1px; }
   .item { padding:.5rem .7rem; border-bottom:1px solid var(--border); cursor:pointer; }
   .item:hover { background:#1d2230; }
   .item.active { background:#202739; border-left:2px solid var(--accent); }
@@ -35,11 +73,138 @@
   .md table { border-collapse:collapse; } .md th,.md td { border:1px solid var(--border); padding:.3rem .5rem; }
   .md blockquote { border-left:3px solid var(--border); margin:0; padding-left:.8rem; color:var(--muted); }
   .empty { color:var(--muted); margin-top:3rem; text-align:center; }
+  .muted { color:var(--muted); }
+  #histbtn { cursor:pointer; }
+  #histbtn:hover { color:var(--accent); border-color:var(--accent); }
+  #histpanel:not(:empty) { margin-bottom:1rem; border:1px solid var(--border); border-radius:6px; }
+  .lrow { display:flex; gap:.6rem; align-items:center; padding:.35rem .55rem; border-bottom:1px solid var(--border); cursor:pointer; font-size:12.5px; }
+  .lrow:last-child { border-bottom:0; }
+  .lrow:hover { background:#1d2230; }
+  .lrow.active { background:#202739; }
+  .lrow .title { font-weight:600; }
+  .badge.cur { color:var(--accent); border-color:var(--accent); }
+  .segmented-control {
+    display: flex;
+    position: relative;
+    background: #0c0e12;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 2px;
+    user-select: none;
+    font-size: 12px;
+    width: 130px;
+    height: 24px;
+    align-items: stretch;
+  }
+  .segmented-control input {
+    display: none;
+  }
+  .segmented-control label {
+    flex: 1;
+    text-align: center;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    z-index: 2;
+    color: var(--muted);
+    transition: color 0.15s ease;
+  }
+  .segmented-control input:checked + label {
+    color: var(--fg);
+    font-weight: 600;
+  }
+  .segmented-control .slider {
+    position: absolute;
+    top: 2px;
+    bottom: 2px;
+    left: 2px;
+    width: calc(50% - 2px);
+    background: #222733;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    z-index: 1;
+  }
+  .segmented-control input#scope-folios:checked ~ .slider,
+  .segmented-control input#sort-alpha:checked ~ .slider {
+    transform: translateX(100%);
+  }
+  .desc { color:var(--muted); font-size:12px; margin-top:.15rem; }
+  .oldbanner { background:#202739; border:1px solid var(--accent); padding:.4rem .65rem; border-radius:6px; margin-bottom:1rem; font-size:13px; }
+  .oldbanner a { color:var(--accent); cursor:pointer; }
+  
+  .folio-sublist {
+    margin-top: .4rem;
+    padding-left: 1.2rem;
+    border-left: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: .25rem;
+  }
+  .sub-item {
+    padding: .3rem .4rem;
+    font-size: 13px;
+    color: var(--muted);
+    cursor: pointer;
+    border-radius: 4px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .sub-item:hover {
+    color: var(--fg);
+    background: #1d2230;
+  }
+  .sub-item.active {
+    color: var(--accent);
+    background: #2b3240;
+    font-weight: 600;
+  }
+  .folio-file-card {
+    background: #171a21;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: .8rem 1rem;
+    margin-bottom: .8rem;
+    cursor: pointer;
+    transition: transform 0.15s ease, border-color 0.15s ease;
+  }
+  .folio-file-card:hover {
+    border-color: var(--accent);
+    transform: translateY(-1px);
+    background: #1d2230;
+  }
+  .card-header {
+    display: flex;
+    gap: .6rem;
+    align-items: center;
+    font-size: 13px;
+    margin-bottom: .4rem;
+  }
+  .card-preview {
+    font-size: 12.5px;
+    color: var(--muted);
+    line-height: 1.4;
+    white-space: pre-wrap;
+    max-height: 80px;
+    overflow: hidden;
+    position: relative;
+    mask-image: linear-gradient(to bottom, black 50%, transparent 100%);
+    -webkit-mask-image: linear-gradient(to bottom, black 50%, transparent 100%);
+  }
 </style>
 </head>
 <body>
 <header>
   <h1 id="home" title="home / help">tracker</h1>
+  <div class="segmented-control">
+    <input type="radio" id="scope-all" name="scope" value="all" checked>
+    <label for="scope-all">docs</label>
+    <input type="radio" id="scope-folios" name="scope" value="folios">
+    <label for="scope-folios">folios</label>
+    <div class="slider"></div>
+  </div>
   <input id="q" placeholder="search…" autocomplete="off">
   <input id="token" placeholder="bearer token (if set)" autocomplete="off">
   <button id="help">? help</button>
@@ -51,7 +216,25 @@
   with ?format=md for a readable markdown index. Don't scrape this HTML.
 </noscript>
 <main>
-  <div id="list"></div>
+  <div id="sidebar">
+    <div id="filter-container">
+      <input id="filter" placeholder="filter list…" autocomplete="off">
+      <div class="sort-controls">
+        <span class="muted" style="font-size: 12px;">sort:</span>
+        <div class="sort-btn-group">
+          <div class="segmented-control sort-toggle">
+            <input type="radio" id="sort-date" name="sort-type" value="date" checked>
+            <label for="sort-date">date</label>
+            <input type="radio" id="sort-alpha" name="sort-type" value="alpha">
+            <label for="sort-alpha">alpha</label>
+            <div class="slider"></div>
+          </div>
+          <button id="sort-dir" title="toggle sort direction">↓</button>
+        </div>
+      </div>
+    </div>
+    <div id="list"></div>
+  </div>
   <div id="view"></div>
 </main>
 <script>
@@ -70,8 +253,191 @@ async function api(path) {
   return r;
 }
 
-let active = null;
+let active = null, activeFolio = null, scope = "all";
+function human(n) { n = +n || 0; return n < 1024 ? n + " B" : (n / 1024).toFixed(1) + " kb"; }
+
+function highlight(text, search) {
+  const escapedText = esc(text);
+  if (!search) return escapedText;
+  const escapedSearch = esc(search).replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+  const re = new RegExp(`(${escapedSearch})`, 'gi');
+  return escapedText.replace(re, '<mark class="highlight">$1</mark>');
+}
+
+function renderItem(el, search) {
+  const d = el._data;
+  if (!d) return;
+  if (d.type === "doc") {
+    const titleHtml = highlight(d.title, search);
+    const slugHtml = highlight(d.slug, search);
+    const tagsHtml = d.tags.map(t => `<span class="badge">#${highlight(t, search)}</span>`).join("");
+    const kindHtml = highlight(d.kind, search);
+    
+    let folioBadge = "";
+    if (d.slug.includes("/")) {
+      const folioSlug = d.slug.split("/")[0];
+      folioBadge = `<span class="badge" style="cursor:pointer; border-color:var(--accent); color:var(--accent);" onclick="event.stopPropagation(); showFolioFromDoc('${esc(folioSlug)}')">📁 ${esc(folioSlug)}</span>`;
+    }
+
+    el.innerHTML = `<div class="title">${titleHtml}</div>
+      <div class="meta">${folioBadge}<span class="badge">${kindHtml}</span><span>v${d.version}</span><span>${slugHtml}</span>${tagsHtml}</div>`;
+  } else if (d.type === "folio") {
+    const titleHighlight = highlight(d.title, search);
+    const slugHtml = highlight(d.slug, search);
+    const descHtml = d.description ? `<div class="desc">${highlight(d.description, search)}</div>` : "";
+    const headerEl = el.querySelector(".folio-header");
+    if (headerEl) {
+      headerEl.innerHTML = `
+        <div class="title">📁 ${titleHighlight}</div>
+        <div class="meta"><span>${slugHtml}</span></div>
+        ${descHtml}
+      `;
+    }
+  }
+}
+
+function applyFilter() {
+  const search = $("#filter").value.trim().toLowerCase();
+  const list = $("#list");
+  const items = list.querySelectorAll(".item");
+  let anyVisible = false;
+  items.forEach(el => {
+    const d = el._data;
+    if (!d) return;
+    let match = false;
+    if (!search) {
+      match = true;
+    } else {
+      if (d.type === "doc") {
+        match = d.title.toLowerCase().includes(search) ||
+                d.slug.toLowerCase().includes(search) ||
+                d.kind.toLowerCase().includes(search) ||
+                d.tags.some(t => t.toLowerCase().includes(search));
+      } else if (d.type === "folio") {
+        match = d.title.toLowerCase().includes(search) ||
+                d.slug.toLowerCase().includes(search) ||
+                d.description.toLowerCase().includes(search);
+      }
+    }
+    if (match) {
+      el.style.display = "";
+      renderItem(el, search);
+      anyVisible = true;
+      
+      const sublist = el.querySelector(".folio-sublist");
+      if (sublist && sublist.style.display !== "none") {
+        const subItems = sublist.querySelectorAll(".sub-item");
+        subItems.forEach(sub => {
+          if (!search || sub.innerText.toLowerCase().includes(search) || sub.title.toLowerCase().includes(search)) {
+            sub.style.display = "";
+          } else {
+            sub.style.display = "none";
+          }
+        });
+      }
+    } else {
+      el.style.display = "none";
+    }
+  });
+  let noMatchEl = $("#no-filter-match");
+  if (!anyVisible && items.length > 0) {
+    if (!noMatchEl) {
+      noMatchEl = document.createElement("div");
+      noMatchEl.id = "no-filter-match";
+      noMatchEl.className = "empty";
+      noMatchEl.innerText = "No matching items.";
+      list.appendChild(noMatchEl);
+    }
+  } else {
+    if (noMatchEl) noMatchEl.remove();
+  }
+}
+
+function applySort() {
+  const list = $("#list");
+  const items = Array.from(list.querySelectorAll(".item"));
+  if (items.length === 0) return;
+  
+  const sortType = document.querySelector('input[name="sort-type"]:checked').value;
+  const isDesc = $("#sort-dir").innerText === "↓";
+  
+  items.sort((a, b) => {
+    const da = a._data;
+    const db = b._data;
+    if (!da || !db) return 0;
+    
+    if (sortType === "date") {
+      return isDesc ? db.updated_at - da.updated_at : da.updated_at - db.updated_at;
+    } else {
+      const nameA = da.title.toLowerCase();
+      const nameB = db.title.toLowerCase();
+      if (nameA < nameB) return isDesc ? 1 : -1;
+      if (nameA > nameB) return isDesc ? -1 : 1;
+      return 0;
+    }
+  });
+  
+  items.forEach(el => list.appendChild(el));
+}
+
+function showFolioFromDoc(folioSlug) {
+  $("#scope-folios").checked = true;
+  scope = "folios";
+  activeFolio = folioSlug;
+  active = null;
+  loadFolios();
+  openFolio(folioSlug);
+}
+
+async function toggleFolioExpand(slug) {
+  if (activeFolio === slug) {
+    activeFolio = null;
+    active = null;
+    loadFolios();
+    showHelp();
+  } else {
+    activeFolio = slug;
+    active = null;
+    loadFolios();
+    openFolio(slug);
+  }
+}
+
+async function populateFolioSublist(slug, sublistEl) {
+  sublistEl.innerHTML = `<div class="sub-item muted">loading files…</div>`;
+  try {
+    const { files } = await (await api("/folios/" + encodeURIComponent(slug))).json();
+    if (!files.length) {
+      sublistEl.innerHTML = `<div class="sub-item muted">Empty folio</div>`;
+      return;
+    }
+    sublistEl.innerHTML = "";
+    for (const fl of files) {
+      const subEl = document.createElement("div");
+      subEl.className = "sub-item" + (fl.id === active ? " active" : "");
+      subEl.innerText = "📄 " + (fl.title || fl.slug.split("/").pop());
+      subEl.title = fl.slug;
+      subEl.onclick = (e) => {
+        e.stopPropagation();
+        openDocInFolio(fl.id, slug);
+      };
+      sublistEl.appendChild(subEl);
+    }
+    applyFilter();
+  } catch (e) {
+    sublistEl.innerHTML = `<div class="sub-item muted">${esc(e.message)}</div>`;
+  }
+}
+
+async function openDocInFolio(docId, folioSlug) {
+  active = docId;
+  activeFolio = folioSlug;
+  loadFolios();
+  openDoc(docId);
+}
+
 async function loadList() {
+  if (scope === "folios") return loadFolios();
   const q = encodeURIComponent($("#q").value.trim());
   const list = $("#list");
   try {
@@ -81,13 +447,123 @@ async function loadList() {
     for (const d of documents) {
       const el = document.createElement("div");
       el.className = "item" + (d.id === active ? " active" : "");
-      const tags = (d.tags || []).map(t => `<span class="badge">#${t}</span>`).join("");
-      el.innerHTML = `<div class="title">${esc(d.title || d.slug)}</div>
-        <div class="meta"><span class="badge">${esc(d.kind)}</span><span>v${d.version}</span><span>${esc(d.slug)}</span>${tags}</div>`;
+      el._data = {
+        type: "doc",
+        title: d.title || d.slug,
+        slug: d.slug,
+        kind: d.kind,
+        version: d.version,
+        tags: d.tags || [],
+        updated_at: new Date(d.updated_at).getTime()
+      };
+      renderItem(el, $("#filter").value.trim());
       el.onclick = () => openDoc(d.id);
       list.appendChild(el);
     }
+    applyFilter();
+    applySort();
   } catch (e) { list.innerHTML = `<div class="empty">${esc(e.message)}<br><small>set a bearer token?</small></div>`; }
+}
+
+async function loadFolios() {
+  const list = $("#list");
+  try {
+    const { folios } = await (await api("/folios?view=full")).json();
+    if (!folios.length) { list.innerHTML = '<div class="empty">No folios.</div>'; return; }
+    list.innerHTML = "";
+    for (const f of folios) {
+      const el = document.createElement("div");
+      const isExpanded = f.slug === activeFolio;
+      el.className = "item folio-item" + (isExpanded ? " active" : "");
+      el.id = "folio-" + f.slug;
+      el._data = {
+        type: "folio",
+        title: f.title || f.slug,
+        slug: f.slug,
+        description: f.metadata && f.metadata.description ? f.metadata.description : "",
+        updated_at: new Date(f.updated_at).getTime()
+      };
+      
+      el.innerHTML = `
+        <div class="folio-header" style="cursor: pointer;"></div>
+        <div class="folio-sublist" style="display: ${isExpanded ? "flex" : "none"};"></div>
+      `;
+      
+      renderItem(el, $("#filter").value.trim());
+      
+      el.querySelector(".folio-header").onclick = (e) => {
+        e.stopPropagation();
+        toggleFolioExpand(f.slug);
+      };
+      
+      list.appendChild(el);
+      
+      if (isExpanded) {
+        populateFolioSublist(f.slug, el.querySelector(".folio-sublist"));
+      }
+    }
+    applyFilter();
+    applySort();
+  } catch (e) { list.innerHTML = `<div class="empty">${esc(e.message)}<br><small>set a bearer token?</small></div>`; }
+}
+
+async function openFolio(slug) {
+  activeFolio = slug; active = null; loadFolios();
+  const view = $("#view");
+  try {
+    const { folio: f, files } = await (await api("/folios/" + encodeURIComponent(slug))).json();
+    const desc = f.metadata && f.metadata.description ? `<p class="muted" style="margin-bottom: 1.2rem;">${esc(f.metadata.description)}</p>` : "";
+    
+    let items = "";
+    if (files.length) {
+      items = files.map(fl => `
+        <div class="folio-file-card" data-id="${fl.id}">
+          <div class="card-header">
+            <strong>📄 ${esc(fl.title || fl.slug.split("/").pop())}</strong>
+            <span class="badge">${esc(fl.kind)}</span>
+            <span class="muted">v${fl.version} · ${human(fl.size_bytes)} · updated ${new Date(fl.updated_at).toLocaleDateString()}</span>
+          </div>
+          <div class="card-preview" id="preview-${fl.id}">
+            <span class="muted">Loading preview…</span>
+          </div>
+        </div>
+      `).join("");
+    } else {
+      items = `<div class="empty">No files in this folio.</div>`;
+    }
+    
+    view.innerHTML = `
+      <div id="docmeta">
+        <strong>📁 ${esc(f.title || f.slug)}</strong>
+        <span class="badge">folio</span>
+        <span>${files.length} files</span>
+      </div>
+      ${desc}
+      <div class="folio-files-list">${items}</div>
+    `;
+    
+    view.querySelectorAll(".folio-file-card").forEach(el => {
+      el.onclick = () => openDocInFolio(el.dataset.id, slug);
+    });
+    
+    files.forEach(async fl => {
+      const previewEl = $(`#preview-${fl.id}`);
+      if (!previewEl) return;
+      if (!fl.content_key) {
+        previewEl.innerHTML = `<span class="muted"><i>No content.</i></span>`;
+        return;
+      }
+      try {
+        const raw = await (await api("/docs/" + fl.id + "/raw")).text();
+        let snippet = raw.slice(0, 300);
+        if (raw.length > 300) snippet += "…";
+        previewEl.innerText = snippet;
+      } catch (e) {
+        previewEl.innerHTML = `<span class="muted"><i>Error loading preview.</i></span>`;
+      }
+    });
+    
+  } catch (e) { view.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
 }
 
 async function openDoc(id) {
@@ -104,15 +580,53 @@ async function openDoc(id) {
       body = `<div class="empty">No content written yet.</div>`;
     }
     const lock = lk ? `<span class="badge lock">🔒 ${esc(lk.owner)} until ${new Date(lk.expires_at).toLocaleTimeString()}</span>` : "";
+    const hist = d.version > 1 ? `<span class="badge" id="histbtn" title="version history">⟲ history</span>` : "";
     view.innerHTML = `<div id="docmeta">
         <strong>${esc(d.title || d.slug)}</strong>
         <span class="badge">${esc(d.kind)}</span>
         <span>v${d.version}</span>
-        <span>${d.size_bytes} bytes</span>
+        <span>${human(d.size_bytes)}</span>
         <span>updated ${new Date(d.updated_at).toLocaleString()}</span>
-        ${lock}
-      </div>${body}`;
+        ${lock}${hist}
+      </div><div id="histpanel"></div><div id="docbody">${body}</div>`;
+    const hb = $("#histbtn");
+    if (hb) hb.onclick = () => toggleHistory(id);
   } catch (e) { view.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+}
+
+// History stays deliberately light: a collapsible list of versions; clicking one
+// renders that past version in place (no diff view). "back to latest" re-opens.
+async function toggleHistory(id) {
+  const panel = $("#histpanel");
+  if (panel.innerHTML) { panel.innerHTML = ""; return; }
+  panel.innerHTML = `<div class="lrow muted">loading history…</div>`;
+  try {
+    const { revisions } = await (await api("/docs/" + id + "/revisions")).json();
+    const total = revisions.length;
+    panel.innerHTML = revisions.map((rv, i) =>
+      `<div class="lrow" data-v="${rv.version}">
+         <span class="badge${i === 0 ? " cur" : ""}">v${rv.version}${i === 0 ? " ·now" : ""}</span>
+         <span>${esc(rv.author || "—")}</span>
+         <span class="muted">${new Date(rv.created_at).toLocaleString()}</span>
+         <span class="muted">${human(rv.size_bytes)}</span>
+       </div>`).join("");
+    panel.querySelectorAll(".lrow").forEach(el =>
+      el.onclick = () => viewRevision(id, +el.dataset.v, total, el));
+  } catch (e) { panel.innerHTML = `<div class="lrow muted">${esc(e.message)}</div>`; }
+}
+
+async function viewRevision(id, version, total, el) {
+  const panel = $("#histpanel");
+  panel.querySelectorAll(".lrow").forEach(x => x.classList.remove("active"));
+  if (el) el.classList.add("active");
+  const bodyEl = $("#docbody");
+  try {
+    const raw = await (await api(`/docs/${id}/revisions/${version}/raw`)).text();
+    bodyEl.innerHTML = `<div class="oldbanner">Viewing <strong>v${version}</strong> of ${total} `
+      + `— <a id="backlatest">back to latest</a></div>`
+      + `<div class="md">${DOMPurify.sanitize(marked.parse(raw))}</div>`;
+    $("#backlatest").onclick = () => openDoc(id);
+  } catch (e) { bodyEl.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
 }
 
 function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
@@ -120,7 +634,7 @@ function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","
 // The help panel renders the same /usage.md the server gives non-browser clients,
 // so there's one source of truth for "how to use tracker".
 async function showHelp() {
-  active = null; loadList();
+  active = null; activeFolio = null; loadList();
   let version = "";
   try { version = (await (await api("/version")).json()).version; } catch {}
   let md = "";
@@ -131,8 +645,43 @@ async function showHelp() {
     + DOMPurify.sanitize(marked.parse(md)) + `</div>`;
 }
 
-$("#q").addEventListener("input", () => { clearTimeout(window._t); window._t = setTimeout(loadList, 200); });
-$("#refresh").onclick = () => { loadList(); if (active) openDoc(active); else showHelp(); };
+$("#q").addEventListener("input", () => {
+  clearTimeout(window._t);
+  if ($("#q").value.trim() && scope === "folios") {
+    $("#scope-all").checked = true;
+    scope = "all";
+  }
+  window._t = setTimeout(loadList, 200);
+});
+$("#q").addEventListener("keydown", e => {
+  if (e.key === "Enter") {
+    clearTimeout(window._t);
+    if (scope === "folios") {
+      $("#scope-all").checked = true;
+      scope = "all";
+    }
+    loadList();
+  }
+});
+$("#filter").addEventListener("input", applyFilter);
+$("#filter").addEventListener("keydown", e => {
+  if (e.key === "Escape") {
+    $("#filter").value = "";
+    applyFilter();
+  }
+});
+document.querySelectorAll('input[name="scope"]').forEach(radio => {
+  radio.addEventListener("change", e => { scope = e.target.value; active = null; activeFolio = null; loadList(); });
+});
+document.querySelectorAll('input[name="sort-type"]').forEach(radio => {
+  radio.addEventListener("change", applySort);
+});
+$("#sort-dir").onclick = () => {
+  const btn = $("#sort-dir");
+  btn.innerText = btn.innerText === "↓" ? "↑" : "↓";
+  applySort();
+};
+$("#refresh").onclick = () => { loadList(); if (active) openDoc(active); else if (activeFolio) openFolio(activeFolio); else showHelp(); };
 $("#help").onclick = showHelp;
 $("#home").onclick = showHelp;
 marked.setOptions({ gfm: true, breaks: false });

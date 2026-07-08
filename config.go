@@ -11,6 +11,10 @@ type Config struct {
 	ListenAddrs []string        // one listener started per address (e.g. LAN + ZeroTier + loopback)
 	APITokens   map[string]bool // bearer tokens; empty => auth disabled (dev only)
 
+	StorageType string // "s3" or "file"
+	BlobDir     string // local directory for "file" storage
+	BaseURL     string // external URL to generate self-referential presigned URLs
+
 	S3Endpoint  string
 	S3AccessKey string
 	S3SecretKey string
@@ -21,6 +25,9 @@ type Config struct {
 func loadConfig() Config {
 	c := Config{
 		DatabaseURL: env("DATABASE_URL", "postgres://coord:coord@127.0.0.1:5432/coord?sslmode=disable"),
+		StorageType: env("STORAGE_TYPE", "file"),
+		BlobDir:     env("BLOB_DIR", "./data/blobs"),
+		BaseURL:     env("BASE_URL", "http://127.0.0.1:8080"),
 		S3Endpoint:  env("S3_ENDPOINT", "192.168.1.100:9000"),
 		S3AccessKey: env("S3_ACCESS_KEY", "admin"),
 		S3SecretKey: env("S3_SECRET_KEY", "adminpassword"),

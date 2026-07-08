@@ -35,6 +35,10 @@ services:
     # reaches Postgres (127.0.0.1:5432) and RustFS (192.168.1.100:9000) on the host.
     network_mode: host
     env_file: .env
+    volumes:
+      # If STORAGE_TYPE=file, map the host's ./data/blobs into the container
+      # so the flat files persist across restarts.
+      - ./data/blobs:./data/blobs
     depends_on:
       postgres:
         condition: service_healthy
