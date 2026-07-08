@@ -41,7 +41,7 @@ folio (`GET /folios/tracker`).
      table — address a doc by its `slug`, then `read_doc` for content.
    - `list_folios()` / `get_folio(slug)` — browse collections.
    - `list_tags()` — discover the tag vocabulary (`folio:*`, `topic:*`, …).
-   - Always check the **"the dev guidance"** folio for cross-project rules.
+   - Always check the shared **dev-guidance** folio for cross-project conventions.
 2. **Before editing a shared doc** — `who_is_editing(id_or_slug)` to avoid
    colliding with another agent.
 3. **Writing/recording**:
