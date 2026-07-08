@@ -8,10 +8,11 @@ Single static Go binary, low footprint, reachable by agents over the network
 ## Agents: MCP server + skill
 
 `mcp/tracker_mcp.py` is an MCP server (a self-contained `uv` script — no install)
-that exposes tracker to any coding agent: `search_docs`, `list_folios`,
-`get_folio`, `read_doc`, `who_is_editing`, `create_doc`, `create_folio`,
-`update_doc` (acquires the lease, writes with the version check, and releases for
-you), `list_actors`, and the task tools. Configure per agent via env:
+that exposes tracker to any coding agent: `search_docs`, `list_tags`,
+`list_folios`, `get_folio`, `read_doc`, `who_is_editing`, `create_doc`,
+`create_folio`, `update_doc` (lease + version-check + release, for you), `retag`
+(tags/metadata without a content rewrite), `list_actors`, and the task tools.
+Configure per agent via env:
 `TRACKER_URL`, `TRACKER_ACTOR` (the agent's identity, stamped on writes),
 `TRACKER_TOKEN` (only if `API_TOKENS` is set).
 
@@ -66,10 +67,8 @@ docker compose logs -f tracker         # logs
 curl http://127.0.0.1:8080/version     # version the running binary reports
 ```
 
-The version is `git describe --tags --always --dirty` (a tag if HEAD is tagged,
-else the short sha, `-dirty` if uncommitted). It's logged at startup, served at
-`/version`, and recorded in every backup's `manifest.json` (`binary_version`), so
-a backup always knows which build produced it.
+The version is `git describe --tags --always --dirty` — logged at startup, served
+at `/version`, and recorded in each backup's `manifest.json`.
 
 For local dev without a container: `make build && set -a && . ./.env && set +a && ./tracker`.
 
@@ -77,29 +76,24 @@ For local dev without a container: `make build && set -a && . ./.env && set +a &
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/healthz` | health check |
-| GET | `/openapi.yaml` | the full OpenAPI 3.1 spec (authoritative reference) |
-| POST | `/docs` | create doc (`{slug,title,kind,tags,metadata,content,content_type}`; `content` seeds v1) |
-| GET | `/docs` | list/search (`?q=&kind=&tag=&limit=&offset=`) |
-| GET | `/docs/{id}` | `{document, content_url, lock}` |
-| PUT | `/docs/{id}` | write content; headers `X-Actor`, `X-Lease-Token`, `If-Match: <version>` |
-| POST | `/docs/{id}/lock` | acquire/renew lease (`{ttl_seconds,reason,lease_token}`); `409` if held |
-| GET | `/docs/{id}/lock` | is it locked, by whom |
-| DELETE | `/docs/{id}/lock` | release (header `X-Lease-Token`) |
-| GET | `/folios` · POST `/folios` | list / create a folio |
-| GET | `/folios/{slug}` | a folio + its files |
-| POST | `/folios/{slug}/files` | add a file (server applies the tag + slug) |
-| GET | `/folios/{slug}/files/{filename}` | a folio file by name (`/raw` for bytes) |
+| GET | `/healthz` · `/version` · `/openapi.yaml` · `/llms.txt` | health, version, spec, agent index |
+| POST · GET | `/docs` | create (`content` seeds v1); list/search (`?q=&mode=&kind=&tag=&view=&limit=&offset=`) |
+| GET · PUT · PATCH | `/docs/{id}` | read `{document,content_url,lock}`; write content (lease + `If-Match`); relabel tags/metadata (no lease, no version bump) |
+| GET | `/docs/{id}/raw` · `/docs/{id}/revisions[/{v}/raw]` | content bytes; version history |
+| POST · GET · DELETE | `/docs/{id}/lock` | acquire/renew (`409` if held) · status · release |
+| GET | `/tags` | tag vocabulary with counts |
+| GET · POST | `/folios` · `/folios/{slug}` · `/folios/{slug}/files[/{filename}[/raw]]` | collections + their files |
 | POST | `/tasks` · `/tasks/claim` · `/tasks/{id}/complete` | task queue |
 | GET | `/actors` · `/actors/{name}/activity` | entity registry + activity |
 
 The **authoritative reference is `openapi.yaml`** (served live at `/openapi.yaml`).
 
 **Conventions.** Every response is wrapped — a single resource under its type
-(`{"document":…}`, `{"folio":…}`, `{"task":…}`, `{"lock":…}`), lists as
-`{"<type>s":[…],"count","total","limit","offset"}`, errors as
-`{"error":{"code","message",…}}` with machine codes (`not_found`, `lease_held`,
-`no_lease`, `version_conflict`, …).
+(`{"document":…}`, `{"folio":…}`, …), lists as `{"<type>s":[…],"count","total",…}`,
+errors as `{"error":{"code","message",…}}` with machine codes. Lists default to a
+trimmed `view=summary`; `view=table` is a compact columnar `{cols,rows}`,
+`view=full` whole objects. Search is `websearch_to_tsquery` (`mode=web` default;
+`mode=plain` for strict AND).
 
 ### Folios
 
@@ -111,8 +105,9 @@ file inherits everything (versioning, leases, attribution, search). Create one
 with `POST /folios` and add files with `POST /folios/{slug}/files`; import your
 recent gists with `scripts/import_gists.py`.
 
-`{id}` accepts a UUID or a single-segment slug; folio files (slug has `/`) are
-addressed by UUID or via `/folios/{slug}/files/{filename}`.
+`{id}` accepts a UUID or a slug — including multi-segment folio slugs like
+`myfolio/file.md`; only `/raw` and `/lock` for those still need the
+`/folios/{slug}/files/…` route or the UUID.
 
 ### Acting entity
 
@@ -174,6 +169,6 @@ switch is deliberate and reversible.
 
 ## Status
 
-v0 — smoke-tested end to end. Known follow-ups: pre-check lease/version before
-S3 upload (rejected writes currently leave GC-able orphan blobs); pgvector
-semantic search; scheduled backups (cron `backup.sh --upload`); orphan/expired-lease GC.
+Running in production. Known follow-ups: pre-check lease/version before blob
+upload (rejected writes can leave GC-able orphans); pgvector semantic search;
+scheduled backups; orphan/expired-lease GC.
