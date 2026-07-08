@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"embed"
+	"fmt"
 	"io/fs"
 	"log"
 	"net"
@@ -21,6 +22,22 @@ var webFS embed.FS
 var openapiSpec []byte
 
 func main() {
+	// Subcommands (default: run the server).
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "migrate-blobs":
+			runMigrateBlobs(os.Args[2:])
+			return
+		case "-h", "--help", "help":
+			fmt.Println(`tracker — self-hosted coordination store for coding agents.
+
+Usage:
+  tracker                       run the HTTP server (default)
+  tracker migrate-blobs ...     copy content blobs between backends (see --help)`)
+			return
+		}
+	}
+
 	cfg := loadConfig()
 
 	ctx := context.Background()

@@ -57,6 +57,12 @@ Single resource wrapped under its type (`{"document":…}`, `{"folio":…}`,
 `{"lock":…}`); lists carry `count/total/limit/offset`; errors are
 `{"error":{"code","message"}}`.
 
+## Storage
+
+Content blobs live in local files or S3 (`STORAGE_TYPE`); Postgres holds only the
+`sha256/<hash>` key. Switch backends with the `tracker migrate-blobs --to file|s3`
+CLI — a content-addressed copy then a config flip (non-destructive, reversible).
+
 ## Reference
 
 Full machine-readable spec: **`GET /openapi.yaml`** (OpenAPI 3.1). tracker

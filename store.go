@@ -127,38 +127,82 @@ func openStore(ctx context.Context, cfg Config) (*Store, error) {
 	if err := db.Ping(ctx); err != nil {
 		return nil, fmt.Errorf("ping postgres: %w", err)
 	}
-
-	var blobs BlobStore
-	if cfg.StorageType == "file" {
-		blobs = &LocalBlobStore{
-			blobDir: cfg.BlobDir,
-			baseURL: cfg.BaseURL,
-		}
-	} else {
-		s3Client, err := minio.New(cfg.S3Endpoint, &minio.Options{
-			Creds:  credentials.NewStaticV4(cfg.S3AccessKey, cfg.S3SecretKey, ""),
-			Secure: cfg.S3UseSSL,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("init s3: %w", err)
-		}
-		exists, err := s3Client.BucketExists(ctx, cfg.S3Bucket)
-		if err != nil {
-			return nil, fmt.Errorf("check bucket: %w", err)
-		}
-		if !exists {
-			if err := s3Client.MakeBucket(ctx, cfg.S3Bucket, minio.MakeBucketOptions{}); err != nil {
-				return nil, fmt.Errorf("create bucket %q: %w", cfg.S3Bucket, err)
-			}
-		}
-		blobs = &S3BlobStore{client: s3Client, bucket: cfg.S3Bucket}
+	blobs, err := buildBlobStore(ctx, cfg, cfg.StorageType, cfg.BlobDir)
+	if err != nil {
+		return nil, err
 	}
-
 	st := &Store{db: db, blobs: blobs}
 	if err := st.migrate(ctx); err != nil {
 		return nil, err
 	}
 	return st, nil
+}
+
+// buildBlobStore constructs a specific blob backend ("file" or "s3") from cfg.
+// blobDir overrides cfg.BlobDir for the file backend, so migrate-blobs can point
+// a destination at a directory other than the active one.
+func buildBlobStore(ctx context.Context, cfg Config, storageType, blobDir string) (BlobStore, error) {
+	if storageType == "file" {
+		if blobDir == "" {
+			blobDir = cfg.BlobDir
+		}
+		if err := os.MkdirAll(blobDir, 0o755); err != nil {
+			return nil, fmt.Errorf("create blob dir %q: %w", blobDir, err)
+		}
+		return &LocalBlobStore{blobDir: blobDir, baseURL: cfg.BaseURL}, nil
+	}
+	s3Client, err := minio.New(cfg.S3Endpoint, &minio.Options{
+		Creds:  credentials.NewStaticV4(cfg.S3AccessKey, cfg.S3SecretKey, ""),
+		Secure: cfg.S3UseSSL,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("init s3: %w", err)
+	}
+	exists, err := s3Client.BucketExists(ctx, cfg.S3Bucket)
+	if err != nil {
+		return nil, fmt.Errorf("check bucket: %w", err)
+	}
+	if !exists {
+		if err := s3Client.MakeBucket(ctx, cfg.S3Bucket, minio.MakeBucketOptions{}); err != nil {
+			return nil, fmt.Errorf("create bucket %q: %w", cfg.S3Bucket, err)
+		}
+	}
+	return &S3BlobStore{client: s3Client, bucket: cfg.S3Bucket}, nil
+}
+
+// BlobRef is a referenced content blob: its key plus a best-effort content type
+// (from a current document that uses it, else a generic default).
+type BlobRef struct {
+	Key         string
+	ContentType string
+}
+
+// AllBlobRefs lists every distinct blob key referenced by a live document or any
+// revision — the authoritative set to migrate (and naturally excludes orphans).
+func (s *Store) AllBlobRefs(ctx context.Context) ([]BlobRef, error) {
+	rows, err := s.db.Query(ctx, `
+		select distinct on (t.content_key)
+			t.content_key, coalesce(d.content_type, 'application/octet-stream')
+		from (
+			select content_key from documents where content_key <> ''
+			union
+			select content_key from document_revisions where content_key <> ''
+		) t
+		left join documents d on d.content_key = t.content_key
+		order by t.content_key`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []BlobRef{}
+	for rows.Next() {
+		var b BlobRef
+		if err := rows.Scan(&b.Key, &b.ContentType); err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) migrate(ctx context.Context) error {

@@ -153,6 +153,25 @@ To restore on a **fresh machine**: clone the repo, create `.env` (point
 `S3_*`/`DATABASE_URL` at that host's RustFS+Postgres), `docker compose up -d
 postgres`, run `restore.sh`, then `docker compose up -d tracker`.
 
+## Switching storage backend
+
+Blobs are content-addressed and Postgres stores only the `sha256/<hash>` key —
+never the backend location — so switching between local files and S3 is just a
+blob copy plus a config flip. The `migrate-blobs` subcommand does the copy:
+
+```bash
+tracker migrate-blobs --to file --blob-dir ./data/blobs   # S3 -> local files
+tracker migrate-blobs --to s3                              # local files -> S3
+#   --dry-run   hash-check + count, write nothing
+#   --verify    also re-read each blob from the destination
+```
+
+It reads every referenced blob from the current backend (`STORAGE_TYPE`), verifies
+each against its hash, and writes it to the destination. It is **non-destructive**
+(the source is left intact) and **idempotent**. On success it prints the cutover
+step — set `STORAGE_TYPE` (and `BLOB_DIR` for file) in `.env` and restart — so the
+switch is deliberate and reversible.
+
 ## Status
 
 v0 — smoke-tested end to end. Known follow-ups: pre-check lease/version before
