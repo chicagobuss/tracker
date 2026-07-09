@@ -1,9 +1,9 @@
 # tracker
 
-A tiny coordination store for a fleet of coding agents. Postgres holds the
+A tiny, coordinated, document store for a fleet of coding agents. Postgres holds the
 index + lease/coordination state; content blobs live in local files or RustFS (S3).
 Single static Go binary, low footprint, reachable by agents over the network
-(e.g. ZeroTier).
+(e.g. LAN/Tailscale/ZeroTier).
 
 ## Agents: MCP server + skill
 
