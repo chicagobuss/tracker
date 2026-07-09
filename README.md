@@ -169,6 +169,12 @@ switch is deliberate and reversible.
 
 ## Status
 
-Running in production. Known follow-ups: pre-check lease/version before blob
-upload (rejected writes can leave GC-able orphans); pgvector semantic search;
-scheduled backups; orphan/expired-lease GC.
+Running in "production" (lol). Known follow-ups:
+
+- pre-check lease/version before blob upload (rejected writes can leave GC-able orphans)
+- pgvector semantic search
+- scheduled backups
+- orphan/expired-lease GC
+- CI/CD, more pacakaging, etc.
+
+PRs welcome but I can't promise I'll get to them!
