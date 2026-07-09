@@ -31,7 +31,7 @@ claude mcp add tracker --scope user \
 
 Agents need a shared source of truth and a way to see **if a doc is already
 being written by another agent**. This is a database problem, not a
-knowledge-app problem — so: Postgres + S3, not Anytype.
+knowledge-app problem — so: Postgres + S3/Files
 
 ## Design
 
@@ -50,7 +50,7 @@ knowledge-app problem — so: Postgres + S3, not Anytype.
 ## Run
 
 Both Postgres and the service run via Docker Compose (no sudo needed). The
-`tracker` container uses host networking, so it binds the loopback/LAN/ZeroTier
+`tracker` container uses host networking, so it binds the loopback/LAN/Tailscale/ZeroTier
 IPs in `LISTEN_ADDR` and reaches Postgres (and optionally S3) on the host.
 
 ```bash
@@ -156,7 +156,7 @@ blob copy plus a config flip. The `migrate-blobs` subcommand does the copy:
 
 ```bash
 tracker migrate-blobs --to file --blob-dir ./data/blobs   # S3 -> local files
-tracker migrate-blobs --to s3                              # local files -> S3
+tracker migrate-blobs --to s3                             # local files -> S3
 #   --dry-run   hash-check + count, write nothing
 #   --verify    also re-read each blob from the destination
 ```
@@ -169,12 +169,13 @@ switch is deliberate and reversible.
 
 ## Status
 
-Running in "production" (lol). Known follow-ups:
+Running in "production" (lol). I've been using it heavily for several weeks. Known follow-ups:
 
 - pre-check lease/version before blob upload (rejected writes can leave GC-able orphans)
 - pgvector semantic search
 - scheduled backups
 - orphan/expired-lease GC
 - CI/CD, more pacakaging, etc.
+- Even simpler example MCP/skill usage
 
 PRs welcome but I can't promise I'll get to them!
