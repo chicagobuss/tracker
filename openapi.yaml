@@ -126,6 +126,11 @@ paths:
       summary: Health check (pings Postgres)
       security: []
       responses: { "200": { description: ok }, "503": { description: unhealthy } }
+  /mcp:
+    post:
+      summary: Native MCP endpoint (Streamable HTTP, JSON-RPC, tools-only)
+      description: "Register in an agent with: claude mcp add --transport http tracker <base>/mcp --header \"X-Actor: <name>\". Mutating tools require the X-Actor header; bearer auth applies as on the REST API."
+      responses: { "200": { description: JSON-RPC response } }
   /version:
     get:
       summary: Running binary version

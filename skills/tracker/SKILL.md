@@ -18,10 +18,12 @@ reachable at `http://127.0.0.1:8080` locally, or over ZeroTier
 of truth for cross-agent coordination and shared documents — it **replaces the
 old GitHub-gist flow**.
 
-Prefer the **`tracker` MCP tools** (auto-registered). They stamp every write with
-your identity (`TRACKER_ACTOR`), so changes are attributed by entity. The full
-API reference is `GET /openapi.yaml`; tracker's own docs live in the `tracker`
-folio (`GET /folios/tracker`).
+Prefer the **`tracker` MCP tools** (served natively by tracker at `/mcp`;
+register once with `claude mcp add --transport http tracker <base>/mcp --header
+"X-Actor: <you>"`). Every write is stamped with your `X-Actor` identity, so
+changes are attributed by entity. The full API reference is `GET
+/openapi.yaml`; tracker's own docs live in the `tracker` folio
+(`GET /folios/tracker`).
 
 ## Core concepts
 
@@ -36,27 +38,29 @@ folio (`GET /folios/tracker`).
 ## When to use it
 
 1. **Before non-trivial work** — search/read relevant context first:
-   - `search_docs(query=...)` — full-text find (quoted `"phrases"`, `OR`,
+   - `list_docs(q=...)` — full-text find (quoted `"phrases"`, `OR`,
      `-negation`; bare words all must match). Returns a compact `cols`/`rows`
-     table — address a doc by its `slug`, then `read_doc` for content.
+     table — address a doc by its `slug`, then `get_doc(id,
+     include_content=true)` or `get_raw(id)` for content.
    - `list_folios()` / `get_folio(slug)` — browse collections.
    - `list_tags()` — discover the tag vocabulary (`folio:*`, `topic:*`, …).
    - Always check the shared **dev-guidance** folio for cross-project conventions.
-2. **Before editing a shared doc** — `who_is_editing(id_or_slug)` to avoid
-   colliding with another agent.
+2. **Before editing a shared doc** — `lock_status(id)` to avoid colliding with
+   another agent.
 3. **Writing/recording**:
-   - `update_doc(id_or_slug, content)` — replaces content safely (it acquires
-     the lease, writes with the version check, and releases — all for you). If
+   - `update_doc(id, content)` — replaces content safely (it acquires the
+     lease, writes with the version check, and releases — all for you). If
      another agent holds the lease it fails clearly without writing; retry later.
-   - `create_doc(slug, title, content, folio=...)` — new doc, optionally inside a
-     folio.
+   - `create_doc(slug, title, content)` — new doc;
+     `add_folio_file(slug, filename, content)` — new doc inside a folio.
    - `create_folio(slug, description)` — new collection.
-   - `retag(id_or_slug, add_tags=, remove_tags=, metadata=)` — change labels
+   - `retag_doc(id, add_tags=, remove_tags=, metadata=)` — change labels
      WITHOUT rewriting content (no lease, version unchanged). Use namespaced
      tags: `topic:x`, `kind:x`, `status:x`.
 4. **Coordination / who's active** — `list_actors()` shows entities and their
-   last activity. Use tasks (`create_task`, `claim_task`, `complete_task`) for a
-   shared work queue (claims are atomic — no two agents get the same task).
+   last activity. Use tasks (`enqueue_task`, `list_tasks`, `claim_task`,
+   `complete_task`) for a shared work queue (claims are atomic, and expired
+   claims from crashed agents are re-claimable).
 
 ## Etiquette
 

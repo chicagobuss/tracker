@@ -55,6 +55,13 @@ Usage:
 		_, _ = w.Write(openapiSpec)
 	})
 
+	// Native MCP endpoint (Streamable HTTP, tools-only, stateless). GET is the
+	// optional server-push stream, which we don't offer.
+	mux.HandleFunc("POST /mcp", srv.auth(srv.mcpHandler))
+	mux.HandleFunc("GET /mcp", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "method not allowed (POST JSON-RPC only)", http.StatusMethodNotAllowed)
+	})
+
 	mux.HandleFunc("POST /docs", srv.auth(srv.createDoc))
 	mux.HandleFunc("GET /docs", srv.auth(srv.listDocs))
 	mux.HandleFunc("GET /tags", srv.auth(srv.listTags))

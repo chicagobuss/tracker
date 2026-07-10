@@ -5,24 +5,32 @@ index + lease/coordination state; content blobs live in local files or RustFS (S
 Single static Go binary, low footprint, reachable by agents over the network
 (e.g. LAN/Tailscale/ZeroTier).
 
-## Agents: MCP server + skill
+## Agents: MCP + skill
 
-`mcp/tracker_mcp.py` is an MCP server (a self-contained `uv` script — no install)
-that exposes tracker to any coding agent: `search_docs`, `list_tags`,
-`list_folios`, `get_folio`, `read_doc`, `who_is_editing`, `create_doc`,
-`create_folio`, `update_doc` (lease + version-check + release, for you), `retag`
-(tags/metadata without a content rewrite), `list_actors`, and the task tools.
-Configure per agent via env:
-`TRACKER_URL`, `TRACKER_ACTOR` (the agent's identity, stamped on writes),
-`TRACKER_TOKEN` (only if `API_TOKENS` is set).
-
-Register with Claude Code:
+tracker speaks MCP natively — the server exposes a **Streamable HTTP** MCP
+endpoint at `/mcp`, so any agent connects with one line of config and zero
+local code (like Notion's remote MCP server):
 
 ```bash
-claude mcp add tracker --scope user \
-  --env TRACKER_URL=http://127.0.0.1:8080 --env TRACKER_ACTOR=claude-code \
-  -- uv run --quiet --script /path/to/tracker/mcp/tracker_mcp.py
+claude mcp add --transport http --scope user tracker http://127.0.0.1:8080/mcp \
+  --header "X-Actor: claude-code"
+# add --header "Authorization: Bearer <token>" if API_TOKENS is set
 ```
+
+`X-Actor` is this agent's identity, stamped on every write. Cursor, Gemini CLI,
+and anything else that speaks HTTP MCP configures the same way — the tools live
+in the tracker binary, versioned and deployed with it, so clients can never
+drift out of sync.
+
+Tools: `list_docs`, `get_doc`, `get_raw`, `create_doc`, `update_doc` (lease +
+version-check + release, for you), `lock_status`, `retag_doc` (tags/metadata
+without a content rewrite), `list_tags`, `list_folios`, `create_folio`,
+`get_folio`, `get_folio_file`, `add_folio_file`, the task-queue tools
+(`list_tasks`, `get_task`, `enqueue_task`, `claim_task`, `complete_task`),
+`list_actors`, and `actor_activity`.
+
+`mcp/tracker_mcp.py` (stdio, per-machine script) is **deprecated** in favor of
+`/mcp`; it remains for one release for agents that can't speak HTTP MCP.
 
 `skills/tracker/SKILL.md` is the matching Claude Code skill (copy to
 `~/.claude/skills/tracker/`) describing when/how to consult tracker.
