@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
@@ -96,8 +97,17 @@ func (s *S3BlobStore) PresignGetObject(ctx context.Context, key string, ttl time
 }
 
 type LocalBlobStore struct {
-	blobDir string
-	baseURL string
+	blobDir    string
+	baseURL    string
+	signingKey []byte
+}
+
+// blobSig is the HMAC over a blob key + expiry, making local content URLs
+// expiring capabilities (the /blobs route verifies it when auth is enabled).
+func blobSig(key []byte, blobKey string, exp int64) string {
+	m := hmac.New(sha256.New, key)
+	fmt.Fprintf(m, "%s|%d", blobKey, exp)
+	return hex.EncodeToString(m.Sum(nil))
 }
 
 func (l *LocalBlobStore) PutObject(ctx context.Context, key string, data []byte, contentType string) error {
@@ -114,7 +124,8 @@ func (l *LocalBlobStore) GetObject(ctx context.Context, key string) (io.ReadClos
 
 func (l *LocalBlobStore) PresignGetObject(ctx context.Context, key string, ttl time.Duration) (string, error) {
 	baseURL := strings.TrimRight(l.baseURL, "/")
-	return fmt.Sprintf("%s/blobs/%s", baseURL, key), nil
+	exp := time.Now().Add(ttl).Unix()
+	return fmt.Sprintf("%s/blobs/%s?e=%d&s=%s", baseURL, key, exp, blobSig(l.signingKey, key, exp)), nil
 }
 
 type Store struct {
@@ -152,7 +163,7 @@ func buildBlobStore(ctx context.Context, cfg Config, storageType, blobDir string
 		if err := os.MkdirAll(blobDir, 0o755); err != nil {
 			return nil, fmt.Errorf("create blob dir %q: %w", blobDir, err)
 		}
-		return &LocalBlobStore{blobDir: blobDir, baseURL: cfg.BaseURL}, nil
+		return &LocalBlobStore{blobDir: blobDir, baseURL: cfg.BaseURL, signingKey: cfg.BlobSigningKey}, nil
 	}
 	s3Client, err := minio.New(cfg.S3Endpoint, &minio.Options{
 		Creds:  credentials.NewStaticV4(cfg.S3AccessKey, cfg.S3SecretKey, ""),
@@ -262,8 +273,8 @@ func (s *Store) CreateDocument(ctx context.Context, slug, title, kind string, ta
 
 	if content == nil {
 		row := s.db.QueryRow(ctx, `
-			insert into documents (slug, title, kind, tags, metadata, created_by, updated_by)
-			values ($1, $2, $3, $4, $5::jsonb, $6, $6)
+			insert into documents (slug, title, kind, tags, metadata, created_by, updated_by, fts)
+			values ($1, $2, $3, $4, $5::jsonb, $6, $6, to_tsvector('english', $2))
 			returning `+docSelect, slug, title, kind, tags, string(metadata), by)
 		doc, err := scanDoc(row)
 		if err == nil {
@@ -394,11 +405,11 @@ func (s *Store) PatchDocument(ctx context.Context, idOrSlug string, p DocPatch, 
 	}
 	defer tx.Rollback(ctx)
 
-	var id, title string
+	var id, title, contentKey string
 	var tags []string
 	var meta json.RawMessage
-	err = tx.QueryRow(ctx, `select id, title, tags, metadata from documents where `+idClause+` for update`, idOrSlug).
-		Scan(&id, &title, &tags, &meta)
+	err = tx.QueryRow(ctx, `select id, title, tags, metadata, coalesce(content_key,'') from documents where `+idClause+` for update`, idOrSlug).
+		Scan(&id, &title, &tags, &meta, &contentKey)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	} else if err != nil {
@@ -416,15 +427,29 @@ func (s *Store) PatchDocument(ctx context.Context, idOrSlug string, p DocPatch, 
 	if len(p.Metadata) > 0 {
 		meta = withMeta(meta, rawToMap(p.Metadata))
 	}
-	if p.Title != nil {
+	ftsSet := ``
+	args := []any{id, tags, string(meta), title, by}
+	if p.Title != nil && *p.Title != title {
+		// A renamed doc must be findable under its NEW title, so reindex fts —
+		// which means re-reading the content text the index also covers.
 		title = *p.Title
+		ftsInput := title
+		if contentKey != "" {
+			text, err := s.readBlobText(ctx, contentKey, 100000)
+			if err != nil {
+				return nil, err
+			}
+			ftsInput += " " + text
+		}
+		ftsSet = `, fts = to_tsvector('english', $6)`
+		args = []any{id, tags, string(meta), title, by, ftsInput}
 	}
 
 	row := tx.QueryRow(ctx, `
 		update documents set tags = $2, metadata = $3::jsonb, title = $4,
-			updated_by = $5, updated_at = now()
+			updated_by = $5, updated_at = now()`+ftsSet+`
 		where id = $1
-		returning `+docSelect, id, tags, string(meta), title, by)
+		returning `+docSelect, args...)
 	doc, err := scanDoc(row)
 	if err != nil {
 		return nil, err
@@ -668,6 +693,20 @@ func (s *Store) WriteContent(ctx context.Context, docID, owner, leaseToken strin
 	}
 	s.touchActor(ctx, owner)
 	return doc, nil
+}
+
+// readBlobText reads up to limit bytes of a blob as text (for fts reindexing).
+func (s *Store) readBlobText(ctx context.Context, key string, limit int64) (string, error) {
+	rc, err := s.blobs.GetObject(ctx, key)
+	if err != nil {
+		return "", err
+	}
+	defer rc.Close()
+	b, err := io.ReadAll(io.LimitReader(rc, limit))
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
 }
 
 // GetContent streams an object's bytes. Used by the web UI so the

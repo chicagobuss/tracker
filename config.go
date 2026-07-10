@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/rand"
 	"os"
 	"strings"
 	"time"
@@ -14,9 +15,10 @@ type Config struct {
 
 	TaskClaimTTL time.Duration // a 'claimed' task older than this is claimable again
 
-	StorageType string // "s3" or "file"
-	BlobDir     string // local directory for "file" storage
-	BaseURL     string // external URL to generate self-referential presigned URLs
+	StorageType    string // "s3" or "file"
+	BlobDir        string // local directory for "file" storage
+	BaseURL        string // external URL to generate self-referential presigned URLs
+	BlobSigningKey []byte // HMAC key for expiring local blob URLs (fresh per process)
 
 	S3Endpoint  string
 	S3AccessKey string
@@ -41,6 +43,12 @@ func loadConfig() Config {
 	c.TaskClaimTTL = time.Hour
 	if d, err := time.ParseDuration(env("TASK_CLAIM_TTL", "1h")); err == nil && d > 0 {
 		c.TaskClaimTTL = d
+	}
+	// Per-process key: a restart invalidates outstanding local blob URLs, which
+	// is fine — they are short-lived (15 min) by design.
+	c.BlobSigningKey = make([]byte, 32)
+	if _, err := rand.Read(c.BlobSigningKey); err != nil {
+		panic("blob signing key: " + err.Error())
 	}
 	for _, t := range strings.Split(env("API_TOKENS", ""), ",") {
 		if t = strings.TrimSpace(t); t != "" {

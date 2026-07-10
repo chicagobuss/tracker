@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
 	"embed"
 	"fmt"
 	"io/fs"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -17,6 +19,23 @@ import (
 
 //go:embed web
 var webFS embed.FS
+
+func bearerOK(cfg Config, r *http.Request) bool {
+	const p = "Bearer "
+	tok := r.Header.Get("Authorization")
+	return len(tok) > len(p) && tok[:len(p)] == p && cfg.APITokens[tok[len(p):]]
+}
+
+// blobSigOK verifies the e=<unix-expiry>&s=<hmac> pair minted by PresignGetObject.
+func blobSigOK(cfg Config, r *http.Request) bool {
+	exp, err := strconv.ParseInt(r.URL.Query().Get("e"), 10, 64)
+	if err != nil || time.Now().Unix() > exp {
+		return false
+	}
+	key := strings.TrimPrefix(r.URL.Path, "/blobs/")
+	want := blobSig(cfg.BlobSigningKey, key, exp)
+	return hmac.Equal([]byte(want), []byte(r.URL.Query().Get("s")))
+}
 
 //go:embed openapi.yaml
 var openapiSpec []byte
@@ -108,6 +127,13 @@ Usage:
 		mux.HandleFunc("GET /blobs/", func(w http.ResponseWriter, r *http.Request) {
 			if strings.HasSuffix(r.URL.Path, "/") {
 				http.NotFound(w, r)
+				return
+			}
+			// When auth is enabled, a blob URL must carry a live HMAC signature
+			// (the expiring content_url) or the caller a valid bearer token —
+			// otherwise every doc would be world-readable by hash forever.
+			if len(cfg.APITokens) > 0 && !bearerOK(cfg, r) && !blobSigOK(cfg, r) {
+				http.Error(w, `{"error":{"code":"unauthorized","message":"expired or missing blob signature"}}`, http.StatusUnauthorized)
 				return
 			}
 			blobHandler.ServeHTTP(w, r)
