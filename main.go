@@ -85,6 +85,7 @@ Usage:
 	mux.HandleFunc("GET /tasks/{id}", srv.auth(srv.getTask))
 	mux.HandleFunc("POST /tasks", srv.auth(srv.createTask))
 	mux.HandleFunc("POST /tasks/claim", srv.auth(srv.claimTask))
+	mux.HandleFunc("POST /tasks/{id}/claim", srv.auth(srv.claimTaskByID))
 	mux.HandleFunc("POST /tasks/{id}/complete", srv.auth(srv.completeTask))
 
 	mux.HandleFunc("GET /actors", srv.auth(srv.listActors))

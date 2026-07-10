@@ -35,6 +35,7 @@ var (
 	ErrVersionConflict = errors.New("version conflict")
 	ErrBadTaskStatus   = errors.New("status must be 'done' or 'failed'")
 	ErrNotClaimant     = errors.New("task is not claimed by this actor")
+	ErrNotClaimable    = errors.New("task is not claimable")
 )
 
 type Document struct {

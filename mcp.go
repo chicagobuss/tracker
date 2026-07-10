@@ -537,13 +537,19 @@ var mcpTools = map[string]mcpTool{
 		},
 	},
 	"claim_task": {
-		desc:     "Atomically claim the next claimable task (no two agents get the same one; expired claims are re-claimable). Returns {claimed:false} when the queue is empty.",
+		desc:     "Atomically claim a task: pass id to claim that specific task, or omit it for the next claimable one FIFO (no two agents get the same task; expired claims are re-claimable). Returns {claimed:false} when nothing is claimable.",
 		mutating: true,
-		schema:   obj(nil, map[string]any{}),
+		schema:   obj(nil, map[string]any{"id": pStr}),
 		fn: func(ctx context.Context, s *Server, actor string, a targs) (any, error) {
-			task, err := s.store.ClaimNextTask(ctx, actor, s.cfg.TaskClaimTTL)
-			if errors.Is(err, ErrNotFound) {
-				return map[string]any{"claimed": false, "task": nil}, nil
+			var task *Task
+			var err error
+			if id := a.str("id"); id != "" {
+				task, err = s.store.ClaimTask(ctx, id, actor, s.cfg.TaskClaimTTL)
+			} else {
+				task, err = s.store.ClaimNextTask(ctx, actor, s.cfg.TaskClaimTTL)
+				if errors.Is(err, ErrNotFound) {
+					return map[string]any{"claimed": false, "task": nil}, nil
+				}
 			}
 			if err != nil {
 				return nil, err

@@ -387,6 +387,18 @@ paths:
           description: "the claimed task, or {task:null} when nothing is claimable"
           content: { application/json: { schema: { type: object, properties: { task: { oneOf: [ { type: "null" }, { $ref: '#/components/schemas/Task' } ] } } } } }
 
+  /tasks/{id}/claim:
+    post:
+      summary: Claim one specific task
+      description: "Same claimability rule as /tasks/claim (open, or claimed with an expired claim); 409 not_claimable otherwise."
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { $ref: '#/components/parameters/Actor' }
+      responses:
+        "200": { description: claimed, content: { application/json: { schema: { type: object, properties: { task: { $ref: '#/components/schemas/Task' } } } } } }
+        "404": { $ref: '#/components/responses/NotFound' }
+        "409": { description: "not_claimable — live claim by another actor, or already done/failed", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+
   /tasks/{id}/complete:
     post:
       summary: Mark a task done|failed (caller must be the claimant)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -72,6 +73,32 @@ func (s *Store) ClaimNextTask(ctx context.Context, worker string, ttl time.Durat
 			order by created_at for update skip locked limit 1
 		)
 		returning `+taskSelect, worker, ttl.Seconds()))
+	if err == nil {
+		s.touchActor(ctx, worker)
+	}
+	return t, err
+}
+
+// ClaimTask claims one specific task by id, under the same claimability rule
+// as ClaimNextTask (open, or claimed with an expired claim).
+func (s *Store) ClaimTask(ctx context.Context, id, worker string, ttl time.Duration) (*Task, error) {
+	t, err := scanTask(s.db.QueryRow(ctx, `
+		update tasks set status = 'claimed', claimed_by = $2, claimed_at = now(),
+			attempts = attempts + 1, updated_at = now()
+		where id::text = $1
+		  and (status = 'open' or (status = 'claimed' and claimed_at < now() - make_interval(secs => $3)))
+		returning `+taskSelect, id, worker, ttl.Seconds()))
+	if errors.Is(err, ErrNotFound) {
+		// No row updated: distinguish a missing task from an unclaimable one.
+		cur, gerr := s.GetTask(ctx, id)
+		if gerr != nil {
+			return nil, gerr
+		}
+		if cur.Status == "claimed" {
+			return nil, fmt.Errorf("%w: claimed by %s", ErrNotClaimable, cur.ClaimedBy)
+		}
+		return nil, fmt.Errorf("%w: status is %s", ErrNotClaimable, cur.Status)
+	}
 	if err == nil {
 		s.touchActor(ctx, worker)
 	}

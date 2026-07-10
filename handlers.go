@@ -48,6 +48,8 @@ func writeErr(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error(), nil)
 	case errors.Is(err, ErrNotClaimant):
 		writeError(w, http.StatusConflict, "not_claimant", err.Error(), nil)
+	case errors.Is(err, ErrNotClaimable):
+		writeError(w, http.StatusConflict, "not_claimable", err.Error(), nil)
 	default:
 		writeError(w, http.StatusInternalServerError, "internal", err.Error(), nil)
 	}
@@ -646,6 +648,20 @@ func (s *Server) claimTask(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"task": nil})
 		return
 	}
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"task": task})
+}
+
+// claimTaskByID claims one specific task (vs. /tasks/claim's FIFO next).
+func (s *Server) claimTaskByID(w http.ResponseWriter, r *http.Request) {
+	worker, ok := s.actor(w, r)
+	if !ok {
+		return
+	}
+	task, err := s.store.ClaimTask(r.Context(), r.PathValue("id"), worker, s.cfg.TaskClaimTTL)
 	if err != nil {
 		writeErr(w, err)
 		return
