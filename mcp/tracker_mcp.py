@@ -3,7 +3,12 @@
 # requires-python = ">=3.11"
 # dependencies = ["mcp>=1.2", "httpx>=0.27"]
 # ///
-"""MCP server for tracker — the coordination store for coding agents.
+"""DEPRECATED: tracker serves MCP natively at POST /mcp (Streamable HTTP).
+Register with:  claude mcp add --transport http tracker <base>/mcp \
+                  --header "X-Actor: <name>"
+This stdio script remains for one release for clients that can't speak HTTP MCP.
+
+MCP server for tracker — the coordination store for coding agents.
 
 Exposes tracker's REST API as MCP tools so any agent (Claude Code, etc.) can read
 shared docs/folios, see who is editing, and write updates safely under its own

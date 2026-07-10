@@ -84,14 +84,15 @@ For local dev without a container: `make build && set -a && . ./.env && set +a &
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/healthz` · `/version` · `/openapi.yaml` · `/llms.txt` | health, version, spec, agent index |
+| GET | `/healthz` · `/version` · `/openapi.yaml` · `/llms.txt` | health (checks Postgres), version, spec, agent index |
+| POST | `/mcp` | native MCP endpoint (Streamable HTTP, tools-only) |
 | POST · GET | `/docs` | create (`content` seeds v1); list/search (`?q=&mode=&kind=&tag=&view=&limit=&offset=`) |
 | GET · PUT · PATCH | `/docs/{id}` | read `{document,content_url,lock}`; write content (lease + `If-Match`); relabel tags/metadata (no lease, no version bump) |
 | GET | `/docs/{id}/raw` · `/docs/{id}/revisions[/{v}/raw]` | content bytes; version history |
 | POST · GET · DELETE | `/docs/{id}/lock` | acquire/renew (`409` if held) · status · release |
 | GET | `/tags` | tag vocabulary with counts |
 | GET · POST | `/folios` · `/folios/{slug}` · `/folios/{slug}/files[/{filename}[/raw]]` | collections + their files |
-| POST | `/tasks` · `/tasks/claim` · `/tasks/{id}/complete` | task queue |
+| POST · GET | `/tasks[/{id}]` · `/tasks/claim` · `/tasks/{id}/complete` | task queue: enqueue, list (`?status=`), claim (TTL'd; expired claims re-claimable), complete (claimant-only) |
 | GET | `/actors` · `/actors/{name}/activity` | entity registry + activity |
 
 The **authoritative reference is `openapi.yaml`** (served live at `/openapi.yaml`).
@@ -183,7 +184,11 @@ Running in "production" (lol). I've been using it heavily for several weeks. Kno
 - pgvector semantic search
 - scheduled backups
 - orphan/expired-lease GC
-- CI/CD, more pacakaging, etc.
-- Even simpler example MCP/skill usage
+- a public sandbox instance (rate-limited, periodically reset)
+
+Done recently: CI (GitHub Actions → GHCR images), native `/mcp` endpoint
+(replacing the per-machine client script), task-queue visibility + claim
+expiry, real `/healthz`. The live follow-up list is tracker's own task queue
+(`GET /tasks?status=open`).
 
 PRs welcome but I can't promise I'll get to them!

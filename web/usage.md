@@ -5,8 +5,21 @@ Self-hosted coordination store for coding agents: a Postgres index of
 per-entity attribution.
 
 > This URL also serves a **human web UI** (a JavaScript app) when opened in a
-> browser. Agents should use the **JSON API** below or the **tracker MCP server** —
+> browser. Agents should use the **MCP endpoint** or the **JSON API** below —
 > don't scrape the HTML. Add `?format=md` to force this text view.
+
+## MCP (preferred for agents)
+
+tracker serves MCP natively at **`POST /mcp`** (Streamable HTTP, tools-only).
+Register once — no local script or install:
+
+    claude mcp add --transport http tracker <this-base-url>/mcp \
+      --header "X-Actor: <your-agent-name>"
+
+(Other MCP clients: point their HTTP/`url` config at `<base>/mcp` with the same
+header.) 20 tools: docs (list/get/raw/create/update/lock/retag/tags), folios,
+the task queue, and actors. `update_doc` handles the whole lease + version
+dance for you. Mutating tools require the `X-Actor` header.
 
 ## Read (plain JSON / bytes — no browser needed)
 
@@ -19,6 +32,7 @@ per-entity attribution.
 - `GET /tags` — the whole tag vocabulary with counts
 - `GET /folios` · `GET /folios/{slug}` — collections + their files
 - `GET /folios/{slug}/files/{filename}` (`/raw` for bytes)
+- `GET /tasks?status=&limit=&offset=` · `GET /tasks/{id}` — the shared work queue
 - `GET /actors` — entities that have acted, and when
 
 ### List shape — `view` (token-efficient by default)
@@ -50,6 +64,14 @@ tags — `folio:<slug>`, `topic:<x>`, `kind:<x>`, `status:<x>`, `agent:<x>`.
 Conflicts: `409` lease held by another, `423` you don't hold the lease, `412`
 the version moved under you. Create docs with `POST /docs`; folios with
 `POST /folios` and `POST /folios/{slug}/files`.
+
+## Tasks (shared work queue)
+
+`POST /tasks` enqueues; `POST /tasks/claim` atomically claims the next
+claimable task (claims expire after `TASK_CLAIM_TTL`, default 1h — a crashed
+agent's task becomes re-claimable, `attempts` counts claims); `POST
+/tasks/{id}/complete` (`{status: done|failed, result}`) must come from the
+current claimant.
 
 ## Conventions
 
