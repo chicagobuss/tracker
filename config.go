@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"strings"
+	"time"
 )
 
 // Config holds runtime settings, all sourced from the environment.
@@ -10,6 +11,8 @@ type Config struct {
 	DatabaseURL string
 	ListenAddrs []string        // one listener started per address (e.g. LAN + ZeroTier + loopback)
 	APITokens   map[string]bool // bearer tokens; empty => auth disabled (dev only)
+
+	TaskClaimTTL time.Duration // a 'claimed' task older than this is claimable again
 
 	StorageType string // "s3" or "file"
 	BlobDir     string // local directory for "file" storage
@@ -34,6 +37,10 @@ func loadConfig() Config {
 		S3Bucket:    env("S3_BUCKET", "coord-docs"),
 		S3UseSSL:    env("S3_USE_SSL", "false") == "true",
 		APITokens:   map[string]bool{},
+	}
+	c.TaskClaimTTL = time.Hour
+	if d, err := time.ParseDuration(env("TASK_CLAIM_TTL", "1h")); err == nil && d > 0 {
+		c.TaskClaimTTL = d
 	}
 	for _, t := range strings.Split(env("API_TOKENS", ""), ",") {
 		if t = strings.TrimSpace(t); t != "" {

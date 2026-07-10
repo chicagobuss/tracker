@@ -74,6 +74,8 @@ Usage:
 	mux.HandleFunc("GET /docs/{id}/lock", srv.auth(srv.getLock))
 	mux.HandleFunc("DELETE /docs/{id}/lock", srv.auth(srv.releaseLock))
 
+	mux.HandleFunc("GET /tasks", srv.auth(srv.listTasks))
+	mux.HandleFunc("GET /tasks/{id}", srv.auth(srv.getTask))
 	mux.HandleFunc("POST /tasks", srv.auth(srv.createTask))
 	mux.HandleFunc("POST /tasks/claim", srv.auth(srv.claimTask))
 	mux.HandleFunc("POST /tasks/{id}/complete", srv.auth(srv.completeTask))

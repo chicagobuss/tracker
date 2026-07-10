@@ -33,6 +33,8 @@ var (
 	ErrLeaseHeld       = errors.New("lease held by another agent")
 	ErrNoLease         = errors.New("caller does not hold a valid lease")
 	ErrVersionConflict = errors.New("version conflict")
+	ErrBadTaskStatus   = errors.New("status must be 'done' or 'failed'")
+	ErrNotClaimant     = errors.New("task is not claimed by this actor")
 )
 
 type Document struct {

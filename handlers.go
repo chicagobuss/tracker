@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -43,6 +44,10 @@ func writeErr(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusLocked, "no_lease", err.Error(), nil)
 	case errors.Is(err, ErrVersionConflict):
 		writeError(w, http.StatusPreconditionFailed, "version_conflict", err.Error(), nil)
+	case errors.Is(err, ErrBadTaskStatus):
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error(), nil)
+	case errors.Is(err, ErrNotClaimant):
+		writeError(w, http.StatusConflict, "not_claimant", err.Error(), nil)
 	default:
 		writeError(w, http.StatusInternalServerError, "internal", err.Error(), nil)
 	}
@@ -65,6 +70,12 @@ func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	if err := s.store.db.Ping(ctx); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "unhealthy", "postgres unreachable", map[string]any{"version": appVersion()})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "version": appVersion()})
 }
 
@@ -577,6 +588,36 @@ func (s *Server) releaseLock(w http.ResponseWriter, r *http.Request) {
 
 // --- tasks ---
 
+func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
+	status := r.URL.Query().Get("status")
+	if status != "" && status != "open" && status != "claimed" && status != "done" && status != "failed" {
+		badRequest(w, "invalid status")
+		return
+	}
+	limit, offset := pageParams(r)
+	tasks, total, err := s.store.ListTasks(r.Context(), status, limit, offset)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tasks":  tasks,
+		"count":  len(tasks),
+		"total":  total,
+		"limit":  limit,
+		"offset": offset,
+	})
+}
+
+func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
+	task, err := s.store.GetTask(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"task": task})
+}
+
 func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.actor(w, r)
 	if !ok {
@@ -600,7 +641,7 @@ func (s *Server) claimTask(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	task, err := s.store.ClaimNextTask(r.Context(), worker)
+	task, err := s.store.ClaimNextTask(r.Context(), worker, s.cfg.TaskClaimTTL)
 	if errors.Is(err, ErrNotFound) {
 		writeJSON(w, http.StatusOK, map[string]any{"task": nil})
 		return

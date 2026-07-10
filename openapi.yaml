@@ -94,6 +94,7 @@ components:
         status: { type: string, description: "open | claimed | done | failed" }
         claimed_by: { type: string }
         claimed_at: { type: string, format: date-time }
+        attempts: { type: integer, description: "times claimed (re-claims of expired claims included)" }
         payload: { type: object, additionalProperties: true }
         result: { type: object, additionalProperties: true }
         created_at: { type: string, format: date-time }
@@ -122,9 +123,9 @@ components:
 paths:
   /healthz:
     get:
-      summary: Liveness check
+      summary: Health check (pings Postgres)
       security: []
-      responses: { "200": { description: ok } }
+      responses: { "200": { description: ok }, "503": { description: unhealthy } }
   /version:
     get:
       summary: Running binary version
@@ -345,6 +346,16 @@ paths:
         "404": { $ref: '#/components/responses/NotFound' }
 
   /tasks:
+    get:
+      summary: List tasks
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [open, claimed, done, failed] } }
+        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 200 } }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+      responses:
+        "200":
+          description: tasks
+          content: { application/json: { schema: { type: object, properties: { tasks: { type: array, items: { $ref: '#/components/schemas/Task' } }, count: { type: integer }, total: { type: integer }, limit: { type: integer }, offset: { type: integer } } } } }
     post:
       summary: Enqueue a task
       parameters: [ { $ref: '#/components/parameters/Actor' } ]
@@ -353,18 +364,27 @@ paths:
       responses:
         "201": { description: created, content: { application/json: { schema: { type: object, properties: { task: { $ref: '#/components/schemas/Task' } } } } } }
 
+  /tasks/{id}:
+    parameters: [ { name: id, in: path, required: true, schema: { type: string } } ]
+    get:
+      summary: Get a task
+      responses:
+        "200": { description: task, content: { application/json: { schema: { type: object, properties: { task: { $ref: '#/components/schemas/Task' } } } } } }
+        "404": { $ref: '#/components/responses/NotFound' }
+
   /tasks/claim:
     post:
-      summary: Atomically claim the next open task
+      summary: Atomically claim the next claimable task
+      description: "Claims expire after TASK_CLAIM_TTL (default 1h): a 'claimed' task older than that is presumed abandoned and is claimable again (attempts is bumped on every claim)."
       parameters: [ { $ref: '#/components/parameters/Actor' } ]
       responses:
         "200":
-          description: "the claimed task, or {task:null} when the queue is empty"
+          description: "the claimed task, or {task:null} when nothing is claimable"
           content: { application/json: { schema: { type: object, properties: { task: { oneOf: [ { type: "null" }, { $ref: '#/components/schemas/Task' } ] } } } } }
 
   /tasks/{id}/complete:
     post:
-      summary: Mark a task done|failed
+      summary: Mark a task done|failed (caller must be the claimant)
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
         - { $ref: '#/components/parameters/Actor' }
@@ -372,6 +392,8 @@ paths:
         content: { application/json: { schema: { type: object, properties: { status: { type: string, enum: [done, failed] }, result: { type: object, additionalProperties: true } } } } }
       responses:
         "200": { description: updated, content: { application/json: { schema: { type: object, properties: { task: { $ref: '#/components/schemas/Task' } } } } } }
+        "400": { $ref: '#/components/responses/BadRequest' }
+        "409": { description: "not_claimant — task is not claimed, or claimed by another actor", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
 
   /actors:
     get:
