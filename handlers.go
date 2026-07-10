@@ -265,6 +265,19 @@ func (s *Server) listDocs(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getDoc(w http.ResponseWriter, r *http.Request) {
 	doc, err := s.store.GetDocument(r.Context(), docID(r))
 	if errors.Is(err, ErrNotFound) {
+		// Multi-segment fallbacks: an exact slug always wins, but when nothing
+		// matches, ".../raw" streams the prefix's bytes and ".../lock" reports
+		// its lease — so folio-file slugs get the same sub-routes as {id}.
+		if rest := r.PathValue("rest"); rest != "" {
+			if base, ok := strings.CutSuffix(rest, "/raw"); ok {
+				s.streamContent(w, r, base)
+				return
+			}
+			if base, ok := strings.CutSuffix(rest, "/lock"); ok {
+				s.lockStatus(w, r, base)
+				return
+			}
+		}
 		writeError(w, http.StatusNotFound, "not_found", "no document with that id or slug",
 			map[string]any{"hint": "folio files are addressable by full slug (/docs/myfolio/file.md) or at /folios/{slug}/files/{filename}"})
 		return
@@ -329,8 +342,14 @@ func (s *Server) putDoc(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, "If-Match header must be the integer base version")
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 64<<20))
 	if err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request_too_large",
+				fmt.Sprintf("body exceeds the %d-byte limit", mbe.Limit), nil)
+			return
+		}
 		badRequest(w, "could not read body")
 		return
 	}
@@ -338,7 +357,7 @@ func (s *Server) putDoc(w http.ResponseWriter, r *http.Request) {
 	if ctype == "" {
 		ctype = "text/markdown"
 	}
-	doc, err := s.store.WriteContent(r.Context(), r.PathValue("id"), owner, token, baseVersion, ctype, body)
+	doc, err := s.store.WriteContent(r.Context(), docID(r), owner, token, baseVersion, ctype, body)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -535,6 +554,10 @@ func (s *Server) rawFolioFile(w http.ResponseWriter, r *http.Request) {
 // --- locks (leases) ---
 
 func (s *Server) acquireLock(w http.ResponseWriter, r *http.Request) {
+	s.acquireLockID(w, r, r.PathValue("id"))
+}
+
+func (s *Server) acquireLockID(w http.ResponseWriter, r *http.Request, id string) {
 	owner, ok := s.actor(w, r)
 	if !ok {
 		return
@@ -549,7 +572,7 @@ func (s *Server) acquireLock(w http.ResponseWriter, r *http.Request) {
 	if ttl <= 0 {
 		ttl = 60 * time.Second
 	}
-	lease, err := s.store.AcquireLease(r.Context(), r.PathValue("id"), owner, in.Reason, ttl, in.LeaseToken)
+	lease, err := s.store.AcquireLease(r.Context(), id, owner, in.Reason, ttl, in.LeaseToken)
 	if errors.Is(err, ErrLeaseHeld) {
 		writeError(w, http.StatusConflict, "lease_held", "document is locked by another actor",
 			map[string]any{"held_by": lease.Owner, "expires_at": lease.ExpiresAt})
@@ -563,7 +586,11 @@ func (s *Server) acquireLock(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getLock(w http.ResponseWriter, r *http.Request) {
-	lease, live, err := s.store.GetLease(r.Context(), r.PathValue("id"))
+	s.lockStatus(w, r, r.PathValue("id"))
+}
+
+func (s *Server) lockStatus(w http.ResponseWriter, r *http.Request, id string) {
+	lease, live, err := s.store.GetLease(r.Context(), id)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -576,16 +603,37 @@ func (s *Server) getLock(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) releaseLock(w http.ResponseWriter, r *http.Request) {
+	s.releaseLockID(w, r, r.PathValue("id"))
+}
+
+func (s *Server) releaseLockID(w http.ResponseWriter, r *http.Request, id string) {
 	token := r.Header.Get("X-Lease-Token")
 	if token == "" {
 		badRequest(w, "X-Lease-Token header required")
 		return
 	}
-	if err := s.store.ReleaseLease(r.Context(), r.PathValue("id"), token); err != nil {
+	if err := s.store.ReleaseLease(r.Context(), id, token); err != nil {
 		writeErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"released": true})
+}
+
+// lockDocRest routes POST/DELETE /docs/{rest...} — the wildcard can only sit at
+// the end of a pattern, so ".../lock" on a multi-segment slug is dispatched by
+// suffix here instead of by a route.
+func (s *Server) lockDocRest(w http.ResponseWriter, r *http.Request) {
+	base, ok := strings.CutSuffix(r.PathValue("rest"), "/lock")
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found",
+			"unknown action — use /docs/{slug}/lock to acquire or release a lease", nil)
+		return
+	}
+	if r.Method == http.MethodDelete {
+		s.releaseLockID(w, r, base)
+		return
+	}
+	s.acquireLockID(w, r, base)
 }
 
 // --- tasks ---

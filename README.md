@@ -115,8 +115,10 @@ with `POST /folios` and add files with `POST /folios/{slug}/files`; import your
 recent gists with `scripts/import_gists.py`.
 
 `{id}` accepts a UUID or a slug — including multi-segment folio slugs like
-`myfolio/file.md`; only `/raw` and `/lock` for those still need the
-`/folios/{slug}/files/…` route or the UUID.
+`myfolio/file.md`, for reads, writes, relabels, `/raw`, and `/lock` alike (an
+exact slug always wins over the `/raw`/`/lock` suffix). The one quirk: a file
+literally *named* `raw` or `lock` collides with the `/docs/{id}/raw|lock`
+routes — address those via `/folios/{slug}/files/{filename}` or the UUID.
 
 ### Acting entity
 

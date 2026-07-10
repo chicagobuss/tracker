@@ -74,12 +74,17 @@ Usage:
 	mux.HandleFunc("GET /docs/{id}/revisions/{version}/raw", srv.auth(srv.rawRevision))
 	mux.HandleFunc("PUT /docs/{id}", srv.auth(srv.putDoc))
 	mux.HandleFunc("PATCH /docs/{id}", srv.auth(srv.patchDoc))
-	// Relabel by full slug too — every folio file's slug is multi-segment.
+	// Write and relabel by full slug too — every folio file's slug is multi-segment.
+	mux.HandleFunc("PUT /docs/{rest...}", srv.auth(srv.putDoc))
 	mux.HandleFunc("PATCH /docs/{rest...}", srv.auth(srv.patchDoc))
 
 	mux.HandleFunc("POST /docs/{id}/lock", srv.auth(srv.acquireLock))
 	mux.HandleFunc("GET /docs/{id}/lock", srv.auth(srv.getLock))
 	mux.HandleFunc("DELETE /docs/{id}/lock", srv.auth(srv.releaseLock))
+	// The {rest...} wildcard must end the pattern, so lock (and raw/lock reads,
+	// handled inside getDoc) on multi-segment slugs dispatch by suffix.
+	mux.HandleFunc("POST /docs/{rest...}", srv.auth(srv.lockDocRest))
+	mux.HandleFunc("DELETE /docs/{rest...}", srv.auth(srv.lockDocRest))
 
 	mux.HandleFunc("GET /tasks", srv.auth(srv.listTasks))
 	mux.HandleFunc("GET /tasks/{id}", srv.auth(srv.getTask))
