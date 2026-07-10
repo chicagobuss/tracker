@@ -11,10 +11,11 @@ services:
       POSTGRES_USER: ${PGUSER:-coord}
       POSTGRES_PASSWORD: ${PGPASSWORD:-coord}
       POSTGRES_DB: ${PGDATABASE:-coord}
-    # Bind to ZeroTier + localhost only (never the public/LAN interface by default).
+    # Loopback only: the host-networked tracker reaches Postgres via 127.0.0.1.
+    # To expose it on another interface (e.g. your ZeroTier IP), add the bind in
+    # a compose.override.yml — a hardcoded IP here breaks any host that lacks it.
     ports:
       - "127.0.0.1:5432:5432"
-      - "10.10.10.10:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -36,9 +37,11 @@ services:
     network_mode: host
     env_file: .env
     volumes:
-      # If STORAGE_TYPE=file, map the host's ./data/blobs into the container
-      # so the flat files persist across restarts.
-      - ./data/blobs:./data/blobs
+      # If STORAGE_TYPE=file, map the host's ./data/blobs into the container so
+      # the flat files persist across restarts. The container target must be
+      # absolute; the binary's workdir is /, so BLOB_DIR=./data/blobs resolves
+      # to /data/blobs and matches this mount.
+      - ./data/blobs:/data/blobs
     depends_on:
       postgres:
         condition: service_healthy
