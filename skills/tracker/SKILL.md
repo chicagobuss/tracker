@@ -54,9 +54,9 @@ changes are attributed by entity. The full API reference is `GET
    - `create_doc(slug, title, content)` — new doc;
      `add_folio_file(slug, filename, content)` — new doc inside a folio.
    - `create_folio(slug, description)` — new collection.
-   - `retag_doc(id, add_tags=, remove_tags=, metadata=)` — change labels
-     WITHOUT rewriting content (no lease, version unchanged). Use namespaced
-     tags: `topic:x`, `kind:x`, `status:x`.
+   - `retag_doc(id, add_tags=, remove_tags=, tags=, metadata=, title=)` —
+     change tags/metadata/title WITHOUT rewriting content (no lease, version
+     unchanged). Use namespaced tags: `topic:x`, `kind:x`, `status:x`.
    - `soft_delete_doc(id)` — hide from normal search; history kept; restorable.
      Prefer this. Use `list_docs(deleted="only")` to find soft-deleted docs.
    - `restore_doc(id)` — undo a soft-delete.
