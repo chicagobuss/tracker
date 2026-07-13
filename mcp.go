@@ -160,10 +160,11 @@ func (a targs) raw(k string) json.RawMessage {
 // --- tool table ---
 
 type mcpTool struct {
-	desc     string
-	schema   map[string]any
-	mutating bool
-	fn       func(ctx context.Context, s *Server, actor string, a targs) (any, error)
+	desc        string
+	schema      map[string]any
+	mutating    bool
+	annotations map[string]any
+	fn          func(ctx context.Context, s *Server, actor string, a targs) (any, error)
 }
 
 func obj(required []string, props map[string]any) map[string]any {
@@ -184,16 +185,21 @@ var pView = map[string]any{"type": "string", "enum": []string{"summary", "table"
 // mcpToolOrder keeps tools/list stable; mcpTools holds the implementations.
 var mcpToolOrder = []string{
 	"list_docs", "get_doc", "get_raw", "create_doc", "update_doc", "lock_status",
-	"retag_doc", "list_tags", "list_folios", "create_folio", "get_folio",
-	"get_folio_file", "add_folio_file", "list_tasks", "get_task", "enqueue_task",
-	"claim_task", "complete_task", "list_actors", "actor_activity",
+	"retag_doc", "soft_delete_doc", "restore_doc", "hard_delete_doc", "list_tags",
+	"list_folios", "create_folio", "get_folio", "get_folio_file", "add_folio_file",
+	"list_tasks", "get_task", "enqueue_task", "claim_task", "complete_task",
+	"list_actors", "actor_activity",
 }
 
 func mcpToolDescriptors() []map[string]any {
 	out := make([]map[string]any, 0, len(mcpToolOrder))
 	for _, name := range mcpToolOrder {
 		t := mcpTools[name]
-		out = append(out, map[string]any{"name": name, "description": t.desc, "inputSchema": t.schema})
+		desc := map[string]any{"name": name, "description": t.desc, "inputSchema": t.schema}
+		if t.annotations != nil {
+			desc["annotations"] = t.annotations
+		}
+		out = append(out, desc)
 	}
 	return out
 }
@@ -248,17 +254,26 @@ func (s *Server) readContent(ctx context.Context, key string) (string, error) {
 
 var mcpTools = map[string]mcpTool{
 	"list_docs": {
-		desc: `Search/list documents. q is full-text (quoted "phrases", OR, -negation; bare words must ALL match). Filter by kind and/or exact tag (e.g. folio:tracker). Default view=table returns {cols,rows}; address a doc by its slug.`,
+		desc: `Search/list documents. q is full-text (quoted "phrases", OR, -negation; bare words must ALL match). Filter by kind and/or exact tag (e.g. folio:tracker). Soft-deleted docs are excluded by default; pass deleted=only|include to search them. Default view=table returns {cols,rows}; address a doc by its slug.`,
 		schema: obj(nil, map[string]any{"q": pStr, "kind": pStr, "tag": pStr,
-			"mode": map[string]any{"type": "string", "enum": []string{"web", "plain"}},
+			"mode":    map[string]any{"type": "string", "enum": []string{"web", "plain"}},
+			"deleted": map[string]any{"type": "string", "enum": []string{"exclude", "only", "include"}, "description": "Soft-delete filter. Default exclude."},
 			"view": pView, "limit": pInt, "offset": pInt}),
 		fn: func(ctx context.Context, s *Server, _ string, a targs) (any, error) {
 			limit, offset := a.num("limit", 50), a.num("offset", 0)
-			docs, total, err := s.store.ListDocuments(ctx, a.str("q"), a.str("kind"), a.str("tag"), a.str("mode"), limit, offset)
+			deleted := a.str("deleted")
+			if deleted == "" {
+				deleted = "exclude"
+			}
+			if deleted != "exclude" && deleted != "only" && deleted != "include" {
+				return nil, errors.New("deleted must be exclude|only|include")
+			}
+			docs, total, err := s.store.ListDocuments(ctx, a.str("q"), a.str("kind"), a.str("tag"), a.str("mode"), deleted, limit, offset)
 			if err != nil {
 				return nil, err
 			}
 			resp := docList(a.str("view"), "documents", docs, total, limit, offset)
+			resp["deleted"] = deleted
 			if total == 0 && len(strings.Fields(a.str("q"))) > 1 && a.str("mode") != "plain" {
 				resp["hint"] = `0 results — multi-word queries match ALL terms. Try fewer words, "a quoted phrase", or "a OR b".`
 			}
@@ -392,6 +407,62 @@ var mcpTools = map[string]mcpTool{
 			return map[string]any{"document": doc}, nil
 		},
 	},
+	"soft_delete_doc": {
+		desc: "Soft-delete a document: it disappears from normal search but remains addressable by id/slug, keeps full revision history, and can be restored. Prefer this over hard_delete_doc. For folios with files, pass cascade=true to soft-delete those files too.",
+		mutating: true,
+		annotations: map[string]any{"destructiveHint": true, "idempotentHint": true},
+		schema: obj([]string{"id"}, map[string]any{
+			"id":      pStr,
+			"cascade": map[string]any{"type": "boolean", "description": "If id is a folio, also soft-delete its files."},
+		}),
+		fn: func(ctx context.Context, s *Server, actor string, a targs) (any, error) {
+			doc, err := s.store.SoftDeleteDocument(ctx, a.str("id"), actor, a.boolean("cascade"))
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"soft_deleted": true, "document": doc}, nil
+		},
+	},
+	"restore_doc": {
+		desc:     "Restore a soft-deleted document so it appears in normal search again.",
+		mutating: true,
+		annotations: map[string]any{"destructiveHint": false, "idempotentHint": true},
+		schema:   obj([]string{"id"}, map[string]any{"id": pStr}),
+		fn: func(ctx context.Context, s *Server, actor string, a targs) (any, error) {
+			doc, err := s.store.RestoreDocument(ctx, a.str("id"), actor)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"restored": true, "document": doc}, nil
+		},
+	},
+	"hard_delete_doc": {
+		desc: "IRREVERSIBLE hard delete: removes the document row (revisions cascade; blobs left for GC). Prefer soft_delete_doc. confirm is REQUIRED and must exactly equal the document's slug — call get_doc first if unsure. For folios with files, pass cascade=true.",
+		mutating: true,
+		annotations: map[string]any{"destructiveHint": true, "idempotentHint": false},
+		schema: obj([]string{"id", "confirm"}, map[string]any{
+			"id": pStr,
+			"confirm": map[string]any{
+				"type":        "string",
+				"description": "Mandatory confirmation: must exactly equal the document's current slug. Hard delete is rejected without this match.",
+			},
+			"cascade": map[string]any{"type": "boolean", "description": "If id is a folio, also hard-delete its files."},
+		}),
+		fn: func(ctx context.Context, s *Server, actor string, a targs) (any, error) {
+			confirm := a.str("confirm")
+			if confirm == "" {
+				return nil, errors.New(`confirm is required and must exactly equal the document slug (get_doc first, then hard_delete_doc with confirm="<slug>")`)
+			}
+			doc, err := s.store.HardDeleteDocument(ctx, a.str("id"), confirm, actor, a.boolean("cascade"))
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{
+				"hard_deleted": true,
+				"document":     map[string]any{"id": doc.ID, "slug": doc.Slug, "title": doc.Title, "kind": doc.Kind},
+			}, nil
+		},
+	},
 	"list_tags": {
 		desc:   "List the whole tag vocabulary with usage counts (folio:*, topic:*, ...).",
 		schema: obj(nil, map[string]any{}),
@@ -408,7 +479,7 @@ var mcpTools = map[string]mcpTool{
 		schema: obj(nil, map[string]any{"limit": pInt, "offset": pInt, "view": pView}),
 		fn: func(ctx context.Context, s *Server, _ string, a targs) (any, error) {
 			limit, offset := a.num("limit", 200), a.num("offset", 0)
-			folios, total, err := s.store.ListDocuments(ctx, "", "folio", "", "", limit, offset)
+			folios, total, err := s.store.ListDocuments(ctx, "", "folio", "", "", "exclude", limit, offset)
 			if err != nil {
 				return nil, err
 			}
@@ -441,7 +512,7 @@ var mcpTools = map[string]mcpTool{
 			if err != nil {
 				return nil, err
 			}
-			files, total, err := s.store.ListDocuments(ctx, "", "", folioTag(folio.Slug), "", 500, 0)
+			files, total, err := s.store.ListDocuments(ctx, "", "", folioTag(folio.Slug), "", "exclude", 500, 0)
 			if err != nil {
 				return nil, err
 			}
@@ -473,6 +544,9 @@ var mcpTools = map[string]mcpTool{
 			}
 			if folio.Kind != "folio" {
 				return nil, fmt.Errorf("'%s' is not a folio", a.str("slug"))
+			}
+			if folio.Deleted() {
+				return nil, ErrDeleted
 			}
 			kind := a.str("kind")
 			if kind == "" {

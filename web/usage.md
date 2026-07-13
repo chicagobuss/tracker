@@ -17,13 +17,15 @@ Register once — no local script or install:
       --header "X-Actor: <your-agent-name>"
 
 (Other MCP clients: point their HTTP/`url` config at `<base>/mcp` with the same
-header.) 20 tools: docs (list/get/raw/create/update/lock/retag/tags), folios,
-the task queue, and actors. `update_doc` handles the whole lease + version
-dance for you. Mutating tools require the `X-Actor` header.
+header.) Tools cover docs (list/get/raw/create/update/lock/retag/soft_delete/
+restore/hard_delete/tags), folios, the task queue, and actors. `update_doc`
+handles the whole lease + version dance for you. Mutating tools require the
+`X-Actor` header. Hard delete requires `confirm` equal to the doc slug.
 
 ## Read (plain JSON / bytes — no browser needed)
 
-- `GET /docs?q=&kind=&tag=&mode=&view=&limit=&offset=` — list / full-text search
+- `GET /docs?q=&kind=&tag=&mode=&deleted=&view=&limit=&offset=` — list / full-text search
+  (`deleted=exclude` default; `only`/`include` for soft-deleted)
 - `GET /docs/{id}` — `{document, content_url, lock}` (id = UUID **or** slug, incl.
   multi-segment folio slugs like `myfolio/file.md`)
 - `GET /docs/{id}/raw` — the document's content bytes
@@ -64,6 +66,15 @@ tags — `folio:<slug>`, `topic:<x>`, `kind:<x>`, `status:<x>`, `agent:<x>`.
 Conflicts: `409` lease held by another, `423` you don't hold the lease, `412`
 the version moved under you. Create docs with `POST /docs`; folios with
 `POST /folios` and `POST /folios/{slug}/files`.
+
+## Delete
+
+- **Soft-delete** (prefer): `POST /docs/{id}/soft-delete` — hides from default
+  search; history kept; restore with `POST /docs/{id}/restore`. Folios with
+  files need `{"cascade":true}`.
+- **Hard-delete** (irreversible): `DELETE /docs/{id}` with
+  `{"confirm":"<exact-slug>"}` (or `X-Confirm-Slug` / `?confirm=`). MCP tool
+  `hard_delete_doc` requires the same `confirm` argument.
 
 ## Tasks (shared work queue)
 

@@ -37,6 +37,9 @@ var (
 	ErrBadTaskStatus   = errors.New("status must be 'done' or 'failed'")
 	ErrNotClaimant     = errors.New("task is not claimed by this actor")
 	ErrNotClaimable    = errors.New("task is not claimable")
+	ErrDeleted         = errors.New("document is soft-deleted; restore it first")
+	ErrConfirmMismatch = errors.New("hard-delete confirm must exactly equal the document slug")
+	ErrFolioNotEmpty   = errors.New("folio still has files; pass cascade=true or delete files first")
 )
 
 type Document struct {
@@ -55,6 +58,8 @@ type Document struct {
 	UpdatedBy   string          `json:"updated_by,omitempty"`
 	CreatedAt   time.Time       `json:"created_at"`
 	UpdatedAt   time.Time       `json:"updated_at"`
+	DeletedAt   *time.Time      `json:"deleted_at,omitempty"`
+	DeletedBy   string          `json:"deleted_by,omitempty"`
 }
 
 type Lease struct {
@@ -240,18 +245,21 @@ func (s *Store) migrate(ctx context.Context) error {
 // docSelect is the column list shared by single/list reads.
 const docSelect = `id, slug, title, kind, coalesce(content_key,''), coalesce(content_hash,''),
 	content_type, size_bytes, tags, metadata, version, coalesce(created_by,''), coalesce(updated_by,''),
-	created_at, updated_at`
+	created_at, updated_at, deleted_at, coalesce(deleted_by,'')`
 
 func scanDoc(row pgx.Row) (*Document, error) {
 	var d Document
 	err := row.Scan(&d.ID, &d.Slug, &d.Title, &d.Kind, &d.ContentKey, &d.ContentHash,
 		&d.ContentType, &d.SizeBytes, &d.Tags, &d.Metadata, &d.Version, &d.CreatedBy, &d.UpdatedBy,
-		&d.CreatedAt, &d.UpdatedAt)
+		&d.CreatedAt, &d.UpdatedAt, &d.DeletedAt, &d.DeletedBy)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	return &d, err
 }
+
+// Deleted reports whether the document carries a soft-delete tombstone.
+func (d *Document) Deleted() bool { return d != nil && d.DeletedAt != nil }
 
 // CreateDocument inserts a new document. metadata (jsonb, may be nil) holds
 // caller-defined fields (e.g. a folio's description/source). If content is
@@ -336,7 +344,10 @@ func (s *Store) GetDocument(ctx context.Context, idOrSlug string) (*Document, er
 // (or "and") uses plainto_tsquery, which ANDs every term. When a query is
 // present, results are ranked by lexical relevance with a gentle recency decay
 // rather than strict recency.
-func (s *Store) ListDocuments(ctx context.Context, q, kind, tag, mode string, limit, offset int) ([]Document, int, error) {
+//
+// deleted selects the soft-delete filter: ""/"exclude" (default) hides tombstones,
+// "only" returns soft-deleted docs, "include" returns both.
+func (s *Store) ListDocuments(ctx context.Context, q, kind, tag, mode, deleted string, limit, offset int) ([]Document, int, error) {
 	if limit <= 0 {
 		limit = 50
 	}
@@ -351,9 +362,17 @@ func (s *Store) ListDocuments(ctx context.Context, q, kind, tag, mode string, li
 	if mode == "plain" || mode == "and" {
 		tsq = `plainto_tsquery('english', $1)`
 	}
+	delFilter := `and deleted_at is null`
+	switch deleted {
+	case "only":
+		delFilter = `and deleted_at is not null`
+	case "include":
+		delFilter = ``
+	}
+
 	filter := `where ($1 = '' or fts @@ ` + tsq + `)
 		  and ($2 = '' or kind = $2)
-		  and ($3 = '' or $3 = any(tags))`
+		  and ($3 = '' or $3 = any(tags)) ` + delFilter
 
 	var total int
 	if err := s.db.QueryRow(ctx, `select count(*) from documents `+filter, q, kind, tag).Scan(&total); err != nil {
@@ -408,12 +427,16 @@ func (s *Store) PatchDocument(ctx context.Context, idOrSlug string, p DocPatch, 
 	var id, title, contentKey string
 	var tags []string
 	var meta json.RawMessage
-	err = tx.QueryRow(ctx, `select id, title, tags, metadata, coalesce(content_key,'') from documents where `+idClause+` for update`, idOrSlug).
-		Scan(&id, &title, &tags, &meta, &contentKey)
+	var deletedAt *time.Time
+	err = tx.QueryRow(ctx, `select id, title, tags, metadata, coalesce(content_key,''), deleted_at from documents where `+idClause+` for update`, idOrSlug).
+		Scan(&id, &title, &tags, &meta, &contentKey, &deletedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	} else if err != nil {
 		return nil, err
+	}
+	if deletedAt != nil {
+		return nil, ErrDeleted
 	}
 
 	if p.Tags != nil { // explicit full replace wins
@@ -509,6 +532,7 @@ type TagCount struct {
 func (s *Store) ListTags(ctx context.Context) ([]TagCount, error) {
 	rows, err := s.db.Query(ctx, `
 		select t, count(*) from documents, unnest(tags) as t
+		where deleted_at is null
 		group by t order by count(*) desc, t`)
 	if err != nil {
 		return nil, err
@@ -538,11 +562,15 @@ func (s *Store) AcquireLease(ctx context.Context, docID, owner, reason string, t
 
 	// Ensure the document exists and serialize concurrent lock attempts.
 	var realID string
-	err = tx.QueryRow(ctx, `select id from documents where `+idClause+` for update`, docID).Scan(&realID)
+	var deletedAt *time.Time
+	err = tx.QueryRow(ctx, `select id, deleted_at from documents where `+idClause+` for update`, docID).Scan(&realID, &deletedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	} else if err != nil {
 		return nil, err
+	}
+	if deletedAt != nil {
+		return nil, ErrDeleted
 	}
 
 	var cur Lease
@@ -649,11 +677,15 @@ func (s *Store) WriteContent(ctx context.Context, docID, owner, leaseToken strin
 
 	var id string
 	var version int
-	err = tx.QueryRow(ctx, `select id, version from documents where `+idClause+` for update`, docID).Scan(&id, &version)
+	var deletedAt *time.Time
+	err = tx.QueryRow(ctx, `select id, version, deleted_at from documents where `+idClause+` for update`, docID).Scan(&id, &version, &deletedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	} else if err != nil {
 		return nil, err
+	}
+	if deletedAt != nil {
+		return nil, ErrDeleted
 	}
 
 	// Require a live lease, held by THIS actor, with a matching token.
@@ -692,6 +724,129 @@ func (s *Store) WriteContent(ctx context.Context, docID, owner, leaseToken strin
 		return nil, err
 	}
 	s.touchActor(ctx, owner)
+	return doc, nil
+}
+
+// SoftDeleteDocument marks a document deleted without removing its row or
+// revisions. Default search excludes it; get-by-id and deleted=only|include still
+// find it. Folios with live files refuse unless cascade=true (which soft-deletes
+// those files too). Idempotent if already soft-deleted.
+func (s *Store) SoftDeleteDocument(ctx context.Context, idOrSlug, by string, cascade bool) (*Document, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	doc, err := scanDoc(tx.QueryRow(ctx, `select `+docSelect+` from documents where `+idClause+` for update`, idOrSlug))
+	if err != nil {
+		return nil, err
+	}
+	if doc.Deleted() {
+		return doc, nil
+	}
+	if doc.Kind == "folio" {
+		var n int
+		if err := tx.QueryRow(ctx, `
+			select count(*) from documents
+			where $1 = any(tags) and deleted_at is null and id <> $2`,
+			folioTag(doc.Slug), doc.ID).Scan(&n); err != nil {
+			return nil, err
+		}
+		if n > 0 && !cascade {
+			return nil, ErrFolioNotEmpty
+		}
+		if cascade && n > 0 {
+			if _, err := tx.Exec(ctx, `
+				update documents set deleted_at = now(), deleted_by = $1, updated_by = $1, updated_at = now()
+				where $2 = any(tags) and deleted_at is null and id <> $3`,
+				by, folioTag(doc.Slug), doc.ID); err != nil {
+				return nil, err
+			}
+			// Drop leases on cascaded files.
+			if _, err := tx.Exec(ctx, `
+				delete from doc_locks
+				where document_id in (
+					select id from documents where $1 = any(tags) and id <> $2
+				)`, folioTag(doc.Slug), doc.ID); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	row := tx.QueryRow(ctx, `
+		update documents set deleted_at = now(), deleted_by = $2, updated_by = $2, updated_at = now()
+		where id = $1
+		returning `+docSelect, doc.ID, by)
+	out, err := scanDoc(row)
+	if err != nil {
+		return nil, err
+	}
+	_, _ = tx.Exec(ctx, `delete from doc_locks where document_id = $1`, doc.ID)
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	s.touchActor(ctx, by)
+	return out, nil
+}
+
+// RestoreDocument clears a soft-delete tombstone. No-op if the doc is live.
+func (s *Store) RestoreDocument(ctx context.Context, idOrSlug, by string) (*Document, error) {
+	row := s.db.QueryRow(ctx, `
+		update documents set deleted_at = null, deleted_by = null, updated_by = $2, updated_at = now()
+		where `+idClause+`
+		returning `+docSelect, idOrSlug, by)
+	doc, err := scanDoc(row)
+	if err != nil {
+		return nil, err
+	}
+	s.touchActor(ctx, by)
+	return doc, nil
+}
+
+// HardDeleteDocument permanently removes a document row (revisions and locks
+// cascade). Blobs are left for later GC. confirm must exactly equal the
+// document's current slug — the mandatory extra confirmation for irreversible
+// deletes. Folios with any remaining files (including soft-deleted) refuse
+// unless cascade=true.
+func (s *Store) HardDeleteDocument(ctx context.Context, idOrSlug, confirm, by string, cascade bool) (*Document, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	doc, err := scanDoc(tx.QueryRow(ctx, `select `+docSelect+` from documents where `+idClause+` for update`, idOrSlug))
+	if err != nil {
+		return nil, err
+	}
+	if confirm != doc.Slug {
+		return nil, fmt.Errorf("%w (got %q, want %q)", ErrConfirmMismatch, confirm, doc.Slug)
+	}
+	if doc.Kind == "folio" {
+		var n int
+		if err := tx.QueryRow(ctx, `
+			select count(*) from documents where $1 = any(tags) and id <> $2`,
+			folioTag(doc.Slug), doc.ID).Scan(&n); err != nil {
+			return nil, err
+		}
+		if n > 0 && !cascade {
+			return nil, ErrFolioNotEmpty
+		}
+		if cascade && n > 0 {
+			if _, err := tx.Exec(ctx, `delete from documents where $1 = any(tags) and id <> $2`,
+				folioTag(doc.Slug), doc.ID); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if _, err := tx.Exec(ctx, `delete from documents where id = $1`, doc.ID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	s.touchActor(ctx, by)
 	return doc, nil
 }
 

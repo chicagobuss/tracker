@@ -57,6 +57,12 @@ changes are attributed by entity. The full API reference is `GET
    - `retag_doc(id, add_tags=, remove_tags=, metadata=)` — change labels
      WITHOUT rewriting content (no lease, version unchanged). Use namespaced
      tags: `topic:x`, `kind:x`, `status:x`.
+   - `soft_delete_doc(id)` — hide from normal search; history kept; restorable.
+     Prefer this. Use `list_docs(deleted="only")` to find soft-deleted docs.
+   - `restore_doc(id)` — undo a soft-delete.
+   - `hard_delete_doc(id, confirm="<exact-slug>")` — irreversible. `confirm`
+     is required and must equal the slug (MCP schema enforces the argument;
+     the server rejects mismatches). Prefer soft-delete.
 4. **Coordination / who's active** — `list_actors()` shows entities and their
    last activity. Use tasks (`enqueue_task`, `list_tasks`, `claim_task`,
    `complete_task`) for a shared work queue (claims are atomic, and expired

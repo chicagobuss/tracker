@@ -76,6 +76,8 @@ components:
         updated_by: { type: string }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+        deleted_at: { type: string, format: date-time, description: "set when soft-deleted; omitted when live" }
+        deleted_by: { type: string }
     Lock:
       type: object
       properties:
@@ -113,7 +115,7 @@ components:
           type: object
           required: [code, message]
           properties:
-            code: { type: string, description: "machine code: not_found, lease_held, no_lease, version_conflict, bad_request, actor_required, unauthorized, internal" }
+            code: { type: string, description: "machine code: not_found, lease_held, no_lease, version_conflict, deleted, confirm_required, confirm_mismatch, folio_not_empty, bad_request, actor_required, unauthorized, internal" }
             message: { type: string }
           additionalProperties: true
   responses:
@@ -148,6 +150,7 @@ paths:
         - { name: mode, in: query, schema: { type: string, enum: [web, plain], default: web }, description: "web = websearch_to_tsquery (quoted phrases, OR, -negation); plain = strict AND" }
         - { name: kind, in: query, schema: { type: string } }
         - { name: tag, in: query, schema: { type: string }, description: "exact tag match, e.g. folio:tracker" }
+        - { name: deleted, in: query, schema: { type: string, enum: [exclude, only, include], default: exclude }, description: "soft-delete filter: exclude (default) hides tombstones; only returns deleted; include returns both" }
         - { name: view, in: query, schema: { type: string, enum: [summary, table, full], default: summary }, description: "summary = trimmed objects; table = columnar {cols,rows}; full = whole Documents" }
         - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 200 } }
         - { name: offset, in: query, schema: { type: integer, default: 0 } }
@@ -248,6 +251,64 @@ paths:
                 title: { type: string }
       responses:
         "200": { description: relabelled, content: { application/json: { schema: { type: object, properties: { document: { $ref: '#/components/schemas/Document' } } } } } }
+        "404": { $ref: '#/components/responses/NotFound' }
+    delete:
+      summary: Hard-delete a document (irreversible)
+      description: |
+        Permanently removes the document row (revisions/locks cascade; blobs left for GC).
+        **Requires confirm equal to the document's exact slug** — send `{"confirm":"<slug>"}`
+        in the body, or `X-Confirm-Slug` / `?confirm=`. Prefer soft-delete for recoverable removal.
+        Folios with files refuse unless `cascade=true`.
+      parameters:
+        - { $ref: '#/components/parameters/Actor' }
+        - { name: X-Confirm-Slug, in: header, required: false, schema: { type: string }, description: "must equal the document slug" }
+        - { name: confirm, in: query, required: false, schema: { type: string } }
+        - { name: cascade, in: query, required: false, schema: { type: boolean } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirm]
+              properties:
+                confirm: { type: string, description: "must exactly equal the document slug" }
+                cascade: { type: boolean }
+      responses:
+        "200": { description: hard-deleted }
+        "400": { description: "confirm_required / confirm_mismatch" }
+        "409": { description: "folio_not_empty" }
+        "404": { $ref: '#/components/responses/NotFound' }
+
+  /docs/{id}/soft-delete:
+    post:
+      summary: Soft-delete a document (recoverable)
+      description: |
+        Marks the document deleted: excluded from default search, still addressable by
+        id/slug, revision history retained, restorable via `/restore`. Folios with live
+        files refuse unless `cascade=true`.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { $ref: '#/components/parameters/Actor' }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                cascade: { type: boolean, description: "if a folio, also soft-delete its files" }
+      responses:
+        "200": { description: soft-deleted, content: { application/json: { schema: { type: object, properties: { soft_deleted: { type: boolean }, document: { $ref: '#/components/schemas/Document' } } } } } }
+        "409": { description: "folio_not_empty" }
+        "404": { $ref: '#/components/responses/NotFound' }
+
+  /docs/{id}/restore:
+    post:
+      summary: Restore a soft-deleted document
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { $ref: '#/components/parameters/Actor' }
+      responses:
+        "200": { description: restored, content: { application/json: { schema: { type: object, properties: { restored: { type: boolean }, document: { $ref: '#/components/schemas/Document' } } } } } }
         "404": { $ref: '#/components/responses/NotFound' }
 
   /docs/{id}/raw:

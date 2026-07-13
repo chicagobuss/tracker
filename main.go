@@ -93,6 +93,9 @@ Usage:
 	mux.HandleFunc("GET /docs/{id}/revisions/{version}/raw", srv.auth(srv.rawRevision))
 	mux.HandleFunc("PUT /docs/{id}", srv.auth(srv.putDoc))
 	mux.HandleFunc("PATCH /docs/{id}", srv.auth(srv.patchDoc))
+	mux.HandleFunc("POST /docs/{id}/soft-delete", srv.auth(srv.softDeleteDoc))
+	mux.HandleFunc("POST /docs/{id}/restore", srv.auth(srv.restoreDoc))
+	mux.HandleFunc("DELETE /docs/{id}", srv.auth(srv.hardDeleteDoc))
 	// Write and relabel by full slug too — every folio file's slug is multi-segment.
 	mux.HandleFunc("PUT /docs/{rest...}", srv.auth(srv.putDoc))
 	mux.HandleFunc("PATCH /docs/{rest...}", srv.auth(srv.patchDoc))
@@ -100,8 +103,8 @@ Usage:
 	mux.HandleFunc("POST /docs/{id}/lock", srv.auth(srv.acquireLock))
 	mux.HandleFunc("GET /docs/{id}/lock", srv.auth(srv.getLock))
 	mux.HandleFunc("DELETE /docs/{id}/lock", srv.auth(srv.releaseLock))
-	// The {rest...} wildcard must end the pattern, so lock (and raw/lock reads,
-	// handled inside getDoc) on multi-segment slugs dispatch by suffix.
+	// The {rest...} wildcard must end the pattern, so lock / soft-delete / restore
+	// / hard-delete on multi-segment slugs dispatch by suffix (or bare DELETE).
 	mux.HandleFunc("POST /docs/{rest...}", srv.auth(srv.lockDocRest))
 	mux.HandleFunc("DELETE /docs/{rest...}", srv.auth(srv.lockDocRest))
 

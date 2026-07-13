@@ -86,8 +86,9 @@ For local dev without a container: `make build && set -a && . ./.env && set +a &
 |---|---|---|
 | GET | `/healthz` · `/version` · `/openapi.yaml` · `/llms.txt` | health (checks Postgres), version, spec, agent index |
 | POST | `/mcp` | native MCP endpoint (Streamable HTTP, tools-only) |
-| POST · GET | `/docs` | create (`content` seeds v1); list/search (`?q=&mode=&kind=&tag=&view=&limit=&offset=`) |
-| GET · PUT · PATCH | `/docs/{id}` | read `{document,content_url,lock}`; write content (lease + `If-Match`); relabel tags/metadata (no lease, no version bump) |
+| POST · GET | `/docs` | create (`content` seeds v1); list/search (`?q=&mode=&kind=&tag=&deleted=&view=&limit=&offset=`) |
+| GET · PUT · PATCH · DELETE | `/docs/{id}` | read; write content (lease + `If-Match`); relabel; **hard-delete** (requires `confirm` = slug) |
+| POST | `/docs/{id}/soft-delete` · `/docs/{id}/restore` | soft-delete (recoverable; optional `cascade` for folios) · restore |
 | GET | `/docs/{id}/raw` · `/docs/{id}/revisions[/{v}/raw]` | content bytes; version history |
 | POST · GET · DELETE | `/docs/{id}/lock` | acquire/renew (`409` if held) · status · release |
 | GET | `/tags` | tag vocabulary with counts |
@@ -115,10 +116,23 @@ with `POST /folios` and add files with `POST /folios/{slug}/files`; import your
 recent gists with `scripts/import_gists.py`.
 
 `{id}` accepts a UUID or a slug — including multi-segment folio slugs like
-`myfolio/file.md`, for reads, writes, relabels, `/raw`, and `/lock` alike (an
-exact slug always wins over the `/raw`/`/lock` suffix). The one quirk: a file
-literally *named* `raw` or `lock` collides with the `/docs/{id}/raw|lock`
-routes — address those via `/folios/{slug}/files/{filename}` or the UUID.
+`myfolio/file.md`, for reads, writes, relabels, delete, `/raw`, and `/lock`
+alike (an exact slug always wins over the `/raw`/`/lock`/`/soft-delete`/
+`/restore` suffix). The one quirk: a file literally *named* `raw`, `lock`,
+`soft-delete`, or `restore` collides with those suffix routes — address those
+via `/folios/{slug}/files/{filename}` or the UUID.
+
+### Soft-delete vs hard-delete
+
+- **Soft-delete** (`POST /docs/{id}/soft-delete`, MCP `soft_delete_doc`) sets
+  `deleted_at`/`deleted_by`. The row and revision history stay; default search
+  (`deleted=exclude`) hides it; `deleted=only|include` finds it; `get_doc` by
+  id/slug still works; `restore_doc` brings it back. Prefer this.
+- **Hard-delete** (`DELETE /docs/{id}`, MCP `hard_delete_doc`) removes the row
+  (revisions cascade; blobs left for GC). It **requires** `confirm` equal to
+  the document's exact slug — MCP marks `confirm` required in the tool schema
+  so agents cannot call it without an explicit matching value. Folios with
+  files need `cascade=true`.
 
 ### Acting entity
 
@@ -208,8 +222,6 @@ everywhere, fts for content-less docs, and signed local blob URLs.
   (pairs with the pre-check) and cleanup of dead `doc_locks` rows.
 
 ### Features
-- **Delete / archive** — no way to remove a doc or folio; a typo'd slug is
-  permanent. Soft-delete or `DELETE /docs/{id}` (blobs left for GC).
 - **Folio pagination** — folio listings hardcode `limit 500` with no paging.
 - **Web UI tasks panel** — browse the queue via the `GET /tasks` endpoints
   (status filter, payload/result detail).

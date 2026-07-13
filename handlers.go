@@ -50,6 +50,14 @@ func writeErr(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "not_claimant", err.Error(), nil)
 	case errors.Is(err, ErrNotClaimable):
 		writeError(w, http.StatusConflict, "not_claimable", err.Error(), nil)
+	case errors.Is(err, ErrDeleted):
+		writeError(w, http.StatusConflict, "deleted", err.Error(), nil)
+	case errors.Is(err, ErrConfirmMismatch):
+		writeError(w, http.StatusBadRequest, "confirm_mismatch", err.Error(),
+			map[string]any{"hint": `pass confirm equal to the document's exact slug (e.g. {"confirm":"my-doc"})`})
+	case errors.Is(err, ErrFolioNotEmpty):
+		writeError(w, http.StatusConflict, "folio_not_empty", err.Error(),
+			map[string]any{"hint": "delete or cascade the folio's files first"})
 	default:
 		writeError(w, http.StatusInternalServerError, "internal", err.Error(), nil)
 	}
@@ -145,7 +153,7 @@ func docID(r *http.Request) string {
 // is a columnar {cols, rows} shape that emits each key once instead of per row
 // (≈10× smaller for a big list); view=full returns whole Document objects.
 
-var tableCols = []string{"slug", "title", "kind", "tags", "kb", "v", "age"}
+var tableCols = []string{"slug", "title", "kind", "tags", "kb", "v", "age", "del"}
 
 func kb(b int64) float64 { return math.Round(float64(b)/1024.0*10) / 10 }
 
@@ -167,11 +175,16 @@ func age(t time.Time) string {
 func summaryView(docs []Document) []map[string]any {
 	out := make([]map[string]any, len(docs))
 	for i, d := range docs {
-		out[i] = map[string]any{
+		m := map[string]any{
 			"id": d.ID, "slug": d.Slug, "title": d.Title, "kind": d.Kind,
 			"tags": d.Tags, "size_bytes": d.SizeBytes, "version": d.Version,
 			"updated_at": d.UpdatedAt,
 		}
+		if d.DeletedAt != nil {
+			m["deleted_at"] = d.DeletedAt
+			m["deleted_by"] = d.DeletedBy
+		}
+		out[i] = m
 	}
 	return out
 }
@@ -179,7 +192,7 @@ func summaryView(docs []Document) []map[string]any {
 func tableView(docs []Document) map[string]any {
 	rows := make([][]any, len(docs))
 	for i, d := range docs {
-		rows[i] = []any{d.Slug, d.Title, d.Kind, strings.Join(d.Tags, ","), kb(d.SizeBytes), d.Version, age(d.UpdatedAt)}
+		rows[i] = []any{d.Slug, d.Title, d.Kind, strings.Join(d.Tags, ","), kb(d.SizeBytes), d.Version, age(d.UpdatedAt), d.Deleted()}
 	}
 	return map[string]any{"cols": tableCols, "rows": rows}
 }
@@ -248,13 +261,22 @@ func (s *Server) listDocs(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	limit, offset := pageParams(r)
 	query := q.Get("q")
-	docs, total, err := s.store.ListDocuments(r.Context(), query, q.Get("kind"), q.Get("tag"), q.Get("mode"), limit, offset)
+	deleted := q.Get("deleted")
+	if deleted == "" {
+		deleted = "exclude"
+	}
+	if deleted != "exclude" && deleted != "only" && deleted != "include" {
+		badRequest(w, "deleted must be exclude|only|include")
+		return
+	}
+	docs, total, err := s.store.ListDocuments(r.Context(), query, q.Get("kind"), q.Get("tag"), q.Get("mode"), deleted, limit, offset)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 	resp := listView(r, "documents", docs)
 	resp["count"], resp["total"], resp["limit"], resp["offset"] = len(docs), total, limit, offset
+	resp["deleted"] = deleted
 	// Don't let a silently-AND'd multi-word query look like an empty store.
 	if total == 0 && len(strings.Fields(query)) > 1 && q.Get("mode") != "plain" {
 		resp["hint"] = `0 results — multi-word queries match ALL terms by default. Try fewer words, "a quoted phrase", or "a OR b".`
@@ -431,7 +453,7 @@ func (s *Server) rawRevision(w http.ResponseWriter, r *http.Request) {
 func folioTag(slug string) string { return "folio:" + slug }
 
 func (s *Server) listFolios(w http.ResponseWriter, r *http.Request) {
-	folios, total, err := s.store.ListDocuments(r.Context(), "", "folio", "", "", 500, 0)
+	folios, total, err := s.store.ListDocuments(r.Context(), "", "folio", "", "", "exclude", 500, 0)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -475,7 +497,7 @@ func (s *Server) getFolio(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	files, total, err := s.store.ListDocuments(r.Context(), "", "", folioTag(folio.Slug), "", 500, 0)
+	files, total, err := s.store.ListDocuments(r.Context(), "", "", folioTag(folio.Slug), "", "exclude", 500, 0)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -500,6 +522,10 @@ func (s *Server) createFolioFile(w http.ResponseWriter, r *http.Request) {
 	}
 	if folio.Kind != "folio" {
 		writeError(w, http.StatusBadRequest, "not_a_folio", "'"+folioSlug+"' is not a folio", nil)
+		return
+	}
+	if folio.Deleted() {
+		writeError(w, http.StatusConflict, "deleted", "folio is soft-deleted; restore it first", nil)
 		return
 	}
 	var in struct {
@@ -620,20 +646,125 @@ func (s *Server) releaseLockID(w http.ResponseWriter, r *http.Request, id string
 }
 
 // lockDocRest routes POST/DELETE /docs/{rest...} — the wildcard can only sit at
-// the end of a pattern, so ".../lock" on a multi-segment slug is dispatched by
-// suffix here instead of by a route.
+// the end of a pattern, so ".../lock" (and soft-delete/restore) on a multi-segment
+// slug is dispatched by suffix here instead of by a route.
 func (s *Server) lockDocRest(w http.ResponseWriter, r *http.Request) {
-	base, ok := strings.CutSuffix(r.PathValue("rest"), "/lock")
-	if !ok {
+	rest := r.PathValue("rest")
+	if base, ok := strings.CutSuffix(rest, "/lock"); ok {
+		if r.Method == http.MethodDelete {
+			s.releaseLockID(w, r, base)
+			return
+		}
+		s.acquireLockID(w, r, base)
+		return
+	}
+	if r.Method == http.MethodPost {
+		if base, ok := strings.CutSuffix(rest, "/soft-delete"); ok {
+			s.softDeleteID(w, r, base)
+			return
+		}
+		if base, ok := strings.CutSuffix(rest, "/restore"); ok {
+			s.restoreDocID(w, r, base)
+			return
+		}
 		writeError(w, http.StatusNotFound, "not_found",
-			"unknown action — use /docs/{slug}/lock to acquire or release a lease", nil)
+			"unknown action — use /docs/{slug}/lock, /soft-delete, or /restore", nil)
 		return
 	}
-	if r.Method == http.MethodDelete {
-		s.releaseLockID(w, r, base)
+	// DELETE /docs/{multi-segment-slug} → hard delete
+	s.hardDeleteID(w, r, rest)
+}
+
+func (s *Server) softDeleteDoc(w http.ResponseWriter, r *http.Request) {
+	s.softDeleteID(w, r, docID(r))
+}
+
+func (s *Server) softDeleteID(w http.ResponseWriter, r *http.Request, id string) {
+	actor, ok := s.actor(w, r)
+	if !ok {
 		return
 	}
-	s.acquireLockID(w, r, base)
+	var in struct {
+		Cascade bool `json:"cascade"`
+	}
+	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in)
+	doc, err := s.store.SoftDeleteDocument(r.Context(), id, actor, in.Cascade)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"document": doc, "soft_deleted": true})
+}
+
+func (s *Server) restoreDoc(w http.ResponseWriter, r *http.Request) {
+	s.restoreDocID(w, r, docID(r))
+}
+
+func (s *Server) restoreDocID(w http.ResponseWriter, r *http.Request, id string) {
+	actor, ok := s.actor(w, r)
+	if !ok {
+		return
+	}
+	doc, err := s.store.RestoreDocument(r.Context(), id, actor)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"document": doc, "restored": true})
+}
+
+func (s *Server) hardDeleteDoc(w http.ResponseWriter, r *http.Request) {
+	s.hardDeleteID(w, r, docID(r))
+}
+
+// hardDeleteConfirm reads the mandatory slug confirmation from JSON body,
+// X-Confirm-Slug header, or ?confirm= — in that preference order.
+func hardDeleteConfirm(r *http.Request) (confirm string, cascade bool) {
+	confirm = strings.TrimSpace(r.Header.Get("X-Confirm-Slug"))
+	if c := r.URL.Query().Get("confirm"); c != "" {
+		confirm = c
+	}
+	cascade = r.URL.Query().Get("cascade") == "true"
+	if r.Body != nil {
+		var in struct {
+			Confirm string `json:"confirm"`
+			Cascade bool   `json:"cascade"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in); err == nil {
+			if in.Confirm != "" {
+				confirm = in.Confirm
+			}
+			if in.Cascade {
+				cascade = true
+			}
+		}
+	}
+	return confirm, cascade
+}
+
+func (s *Server) hardDeleteID(w http.ResponseWriter, r *http.Request, id string) {
+	actor, ok := s.actor(w, r)
+	if !ok {
+		return
+	}
+	confirm, cascade := hardDeleteConfirm(r)
+	if confirm == "" {
+		writeError(w, http.StatusBadRequest, "confirm_required",
+			"hard delete requires confirm equal to the document's exact slug",
+			map[string]any{"hint": `send {"confirm":"<slug>"} in the body, or X-Confirm-Slug / ?confirm=`})
+		return
+	}
+	doc, err := s.store.HardDeleteDocument(r.Context(), id, confirm, actor, cascade)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"hard_deleted": true,
+		"document": map[string]any{
+			"id": doc.ID, "slug": doc.Slug, "title": doc.Title, "kind": doc.Kind,
+		},
+	})
 }
 
 // --- tasks ---
