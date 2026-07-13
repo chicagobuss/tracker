@@ -258,7 +258,7 @@ var mcpTools = map[string]mcpTool{
 		schema: obj(nil, map[string]any{"q": pStr, "kind": pStr, "tag": pStr,
 			"mode":    map[string]any{"type": "string", "enum": []string{"web", "plain"}},
 			"deleted": map[string]any{"type": "string", "enum": []string{"exclude", "only", "include"}, "description": "Soft-delete filter. Default exclude."},
-			"view": pView, "limit": pInt, "offset": pInt}),
+			"view":    pView, "limit": pInt, "offset": pInt}),
 		fn: func(ctx context.Context, s *Server, _ string, a targs) (any, error) {
 			limit, offset := a.num("limit", 50), a.num("offset", 0)
 			deleted := a.str("deleted")
@@ -408,8 +408,8 @@ var mcpTools = map[string]mcpTool{
 		},
 	},
 	"soft_delete_doc": {
-		desc: "Soft-delete a document: it disappears from normal search but remains addressable by id/slug, keeps full revision history, and can be restored. Prefer this over hard_delete_doc. For folios with files, pass cascade=true to soft-delete those files too.",
-		mutating: true,
+		desc:        "Soft-delete a document: it disappears from normal search but remains addressable by id/slug, keeps full revision history, and can be restored. Prefer this over hard_delete_doc. For folios with files, pass cascade=true to soft-delete those files too.",
+		mutating:    true,
 		annotations: map[string]any{"destructiveHint": true, "idempotentHint": true},
 		schema: obj([]string{"id"}, map[string]any{
 			"id":      pStr,
@@ -424,10 +424,10 @@ var mcpTools = map[string]mcpTool{
 		},
 	},
 	"restore_doc": {
-		desc:     "Restore a soft-deleted document so it appears in normal search again.",
-		mutating: true,
+		desc:        "Restore a soft-deleted document so it appears in normal search again.",
+		mutating:    true,
 		annotations: map[string]any{"destructiveHint": false, "idempotentHint": true},
-		schema:   obj([]string{"id"}, map[string]any{"id": pStr}),
+		schema:      obj([]string{"id"}, map[string]any{"id": pStr}),
 		fn: func(ctx context.Context, s *Server, actor string, a targs) (any, error) {
 			doc, err := s.store.RestoreDocument(ctx, a.str("id"), actor)
 			if err != nil {
@@ -437,8 +437,8 @@ var mcpTools = map[string]mcpTool{
 		},
 	},
 	"hard_delete_doc": {
-		desc: "IRREVERSIBLE hard delete: removes the document row (revisions cascade; blobs left for GC). Prefer soft_delete_doc. confirm is REQUIRED and must exactly equal the document's slug — call get_doc first if unsure. For folios with files, pass cascade=true.",
-		mutating: true,
+		desc:        "IRREVERSIBLE hard delete: removes the document row (revisions cascade; blobs left for GC). Prefer soft_delete_doc. confirm is REQUIRED and must exactly equal the document's slug — call get_doc first if unsure. For folios with files, pass cascade=true.",
+		mutating:    true,
 		annotations: map[string]any{"destructiveHint": true, "idempotentHint": false},
 		schema: obj([]string{"id", "confirm"}, map[string]any{
 			"id": pStr,
