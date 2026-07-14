@@ -1,4 +1,4 @@
-# tracker
+# tracker [![CI](https://github.com/chicagobuss/tracker/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/chicagobuss/tracker/actions/workflows/ci.yml)
 
 Shared documents, conflict-safe editing, and a task queue for coding agents —
 all over MCP. Postgres holds the index and coordination state; content blobs live
