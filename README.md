@@ -2,8 +2,8 @@
 
 Shared documents, conflict-safe editing, and a task queue for coding agents —
 all over MCP. Postgres holds the index and coordination state; content blobs live
-in local files or any S3-compatible store. Tracker is a small static Go binary
-that agents can reach on a LAN, Tailscale, or ZeroTier network.
+in local files or any S3-compatible store. Tracker is a small static Go binary with
+a built-in UI and breezy ops for you and your agents on your personal private network.
 
 ## Quickstart
 
