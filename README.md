@@ -302,7 +302,7 @@ entity that **holds the lease** (actor ≠ lease owner → `423`).
 
 ### Folios
 
-A **folio** is a little collection of related documents (think: a GitHub gist).
+A **folio** is a collection of related documents (modeled after GitHub gists).
 It's modelled tableless: the folio is itself a document with `kind='folio'` whose
 `metadata` holds `{description, public, github_id, ...}`; its files are documents
 tagged `folio:<slug>` with slug `<folio-slug>/<filename>`. So a folio file
