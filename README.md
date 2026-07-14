@@ -382,43 +382,56 @@ per-machine client script), task-queue visibility + claim expiry + claim-by-id, 
 real `/healthz`, soft/hard delete, and a test suite covering the lease/CAS and
 task-claim state machines.
 
-**Want to hack on it?** The authoritative backlog is tracker's own task queue —
-`GET /tasks?status=open` (each payload carries details, priorities, and
-`file:line` pointers).
-
 ### Hardening
-- **Request logging / metrics** — only startup log lines exist today; add
-  access-log middleware (method, path, status, duration, actor), maybe counters
-  for writes/lease conflicts.
-- **Auth hardening** — constant-time token compare; implement the actor↔token
-  binding the docs hint at (a token pins which `X-Actor` it may assert).
-- **Migration version tracking** — every `migrations/*.sql` re-runs on each boot
-  and relies on idempotency; a `schema_migrations` table makes the first
-  non-idempotent migration safe.
-- **Write pre-check** — validate lease/version *before* the blob upload in
-  `WriteContent`, so rejected writes (412/423) stop minting orphan blobs.
-- **Orphan-blob / expired-lease GC** — refcount sweep of unreferenced blobs
-  (pairs with the pre-check) and cleanup of dead `doc_locks` rows.
-- **Handler-level tests** — the store is covered; the HTTP/MCP layer isn't.
+
+  - Request logging / metrics — only startup/shutdown logs exist today; add
+    access-log middleware (method, path, status, duration, actor), plus counters
+    for writes and lease conflicts.
+
+  - Auth hardening — use constant-time bearer-token comparison; implement
+    actor↔token binding so a token pins which X-Actor it may assert.
+
+  - Migration version tracking — every migrations/*.sql re-runs on each boot
+    and relies on idempotency. Add transactionally applied, checksummed migration
+    tracking before introducing a non-idempotent migration.
+
+  - Write pre-check — check lease/version before blob upload to reduce orphan
+    blobs on rejected writes (412/423), while retaining the transactional check to
+    prevent races.
+
+  - Orphan-blob / expired-lease GC — mark-and-sweep blobs not referenced by
+    documents or document_revisions, and periodically remove expired
+    doc_locks.
+
+  - HTTP/MCP tests — the store state machines are covered, but request-level
+    REST and MCP behavior is effectively untested.
 
 ### Features
-- **Folio pagination** — folio listings hardcode `limit 500` with no paging.
-- **Web UI tasks panel** — browse the queue via the `GET /tasks` endpoints
-  (status filter, payload/result detail).
-- **pgvector semantic search** — the `embedding` column already exists; populate
-  on write, add a semantic query path.
 
-### Ops
-- **Scheduled off-box backups** — cron `scripts/backup.sh --upload` to R2/S3 plus
-  retention; the backup/restore scripts are already round-trip verified.
-- **Public sandbox instance** — a rate-limited, internet-facing demo: Caddy in
-  front (per-IP limits, body caps), bridge networking with only the proxy exposed,
-  a seed-restore reset every ~6h, and app-side quotas (`MAX_DOCS` /
-  `MAX_TOTAL_BLOB_BYTES`) so one actor can't fill the disk between resets. The
-  native `/mcp` endpoint then gives visitors one-command agent onboarding.
+  - REST folio pagination — GET /folios and folio file listings hardcode
+    limit 500 with no paging. MCP list_folios already supports limit and
+    offset.
 
-Longer-horizon ideas (versioning growth levers — blob compression, retention
-thinning, content-defined chunking) are deliberately deferred until metrics
-justify them; see the `tracker` folio's `expansion-ideas.md` in the store.
+  - Web UI tasks panel — browse the queue through the existing task endpoints,
+    including status filtering and payload/result detail.
+
+  - pgvector semantic search — the embedding column already exists; populate
+    it on write and add a semantic query path.
+
+  ### Ops
+
+  - Scheduled off-box backups — schedule scripts/backup.sh --upload to R2/S3
+    with retention, and add automated restore verification against manifest
+    document/blob counts.
+
+  - Public sandbox instance — a rate-limited, internet-facing demo: Caddy in
+    front with per-IP limits and body caps; bridge networking with only the proxy
+    exposed; a seed-restore reset every ~6h; and app-side quotas such as
+    MAX_DOCS / MAX_TOTAL_BLOB_BYTES so one actor cannot fill the disk between
+    resets. The native /mcp endpoint then gives visitors one-command agent
+    onboarding.
+
+  Longer-horizon ideas—blob compression, retention thinning, and content-defined
+  chunking—should wait until usage metrics justify their complexity.
 
 PRs welcome but I can't promise I'll get to them!
