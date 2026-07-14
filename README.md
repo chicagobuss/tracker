@@ -84,7 +84,7 @@ or a private overlay network — but it is the only thing standing between an op
 port and an unauthenticated write API. Turn it on before you expose tracker
 anywhere you don't fully trust.
 
-## Turning auth on
+## Enabling auth (optional)
 
 Generate a token in your shell, then paste its literal output into `.env` (do
 not put the `$(...)` command substitution in the file):
