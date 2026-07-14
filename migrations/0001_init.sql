@@ -1,18 +1,19 @@
--- Coordination store: Postgres index, content blobs live in RustFS (S3).
+-- Coordination store: Postgres index; content blobs live in the configured
+-- blob store (local files or any S3-compatible bucket).
 -- Applied idempotently on server startup.
 
 create extension if not exists vector;       -- pgvector, for later semantic search
 create extension if not exists pgcrypto;     -- gen_random_uuid()
 
 -- ---------------------------------------------------------------------------
--- documents: the index. Big content is in RustFS, keyed by content_key (sha256).
+-- documents: the index. Content lives in the blob store, keyed by content_key (sha256).
 -- ---------------------------------------------------------------------------
 create table if not exists documents (
   id            uuid primary key default gen_random_uuid(),
   slug          text unique not null,
   title         text not null default '',
   kind          text not null default 'note',    -- note | spec | task | ...
-  content_key   text,                              -- rustfs object key (sha256), null until first write
+  content_key   text,                              -- blob key (sha256), null until first write
   content_hash  text,                              -- sha256 hex of current content
   content_type  text not null default 'text/markdown',
   size_bytes    bigint not null default 0,
@@ -32,7 +33,7 @@ create index if not exists documents_kind_idx  on documents (kind);
 
 -- ---------------------------------------------------------------------------
 -- document_revisions: immutable history. Blobs are retained because keys are
--- content-hashes, so old versions remain fetchable from RustFS.
+-- content-hashes, so old versions remain fetchable from the blob store.
 -- ---------------------------------------------------------------------------
 create table if not exists document_revisions (
   id           bigserial primary key,

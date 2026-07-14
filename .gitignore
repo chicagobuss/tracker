@@ -4,7 +4,6 @@
 pgdata/
 # compiled binary at repo root only (anchored, so skills/tracker/ isn't ignored)
 /tracker
-/trackerd
 *.log
 .serena/
 backups/

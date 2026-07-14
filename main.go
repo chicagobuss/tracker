@@ -58,6 +58,9 @@ Usage:
 	}
 
 	cfg := loadConfig()
+	if err := cfg.validate(); err != nil {
+		log.Fatalf("config: %v", err)
+	}
 
 	ctx := context.Background()
 	store, err := openStore(ctx, cfg)
@@ -170,6 +173,13 @@ Usage:
 		authState = "enabled"
 	}
 
+	// Report the backend actually in use — printing a bucket name while serving
+	// from local files (or vice versa) is worse than printing nothing.
+	storage := "file:" + cfg.BlobDir
+	if cfg.StorageType == "s3" {
+		storage = "s3:" + cfg.S3Bucket
+	}
+
 	// One http.Server per listen address (e.g. loopback + LAN + ZeroTier), all
 	// sharing the same handler. Bind each up front so a bad/unavailable address
 	// fails fast instead of silently dropping an interface.
@@ -181,7 +191,7 @@ Usage:
 		}
 		srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 		servers = append(servers, srv)
-		log.Printf("tracker %s listening on %s | bucket=%s | auth=%s", appVersion(), addr, cfg.S3Bucket, authState)
+		log.Printf("tracker %s listening on %s | storage=%s | auth=%s", appVersion(), addr, storage, authState)
 		go func() {
 			if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 				log.Fatalf("serve %s: %v", addr, err)

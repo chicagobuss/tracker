@@ -12,7 +12,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 set -a; . ./.env; set +a
 
-PG_CONTAINER=${PG_CONTAINER:-coord-postgres}
+PG_CONTAINER=${PG_CONTAINER:-tracker-postgres}
 SRC=""; FROM_S3=""; DB="$PGDATABASE"; BUCKET="$S3_BUCKET"
 while [ $# -gt 0 ]; do
   case "$1" in

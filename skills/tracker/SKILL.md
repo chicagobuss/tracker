@@ -12,11 +12,13 @@ description: >-
 
 # tracker
 
-tracker is a self-hosted coordination store (Postgres index + RustFS blobs)
-reachable at `http://127.0.0.1:8080` locally, or over ZeroTier
-`http://10.10.10.10:8080` / LAN `http://192.168.1.100:8080`. It is the source
-of truth for cross-agent coordination and shared documents — it **replaces the
-old GitHub-gist flow**.
+<!-- SETUP: replace with your instance's base URL (and add the ones you reach it
+     by from other machines, e.g. a LAN or Tailscale/ZeroTier address). -->
+**Base URL:** `http://127.0.0.1:8770`
+
+tracker is a self-hosted coordination store (Postgres index + file/S3 blobs). It
+is the source of truth for cross-agent coordination and shared documents — it
+**replaces the old GitHub-gist flow**.
 
 Prefer the **`tracker` MCP tools** (served natively by tracker at `/mcp`;
 register once with `claude mcp add --transport http tracker <base>/mcp --header

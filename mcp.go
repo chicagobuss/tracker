@@ -3,7 +3,7 @@ package main
 // Native MCP endpoint (Streamable HTTP transport): POST /mcp accepts JSON-RPC
 // and exposes the store as MCP tools, so any agent connects with just
 //
-//	claude mcp add --transport http tracker http://<host>:8080/mcp \
+//	claude mcp add --transport http tracker http://<host>:8770/mcp \
 //	  --header "X-Actor: <name>" [--header "Authorization: Bearer <token>"]
 //
 // — no local client script. Tools-only and stateless: no session ids, no

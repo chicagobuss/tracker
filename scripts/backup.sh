@@ -10,7 +10,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 set -a; . ./.env; set +a
 
-PG_CONTAINER=${PG_CONTAINER:-coord-postgres}
+PG_CONTAINER=${PG_CONTAINER:-tracker-postgres}
 OUT_DIR=${BACKUP_DIR:-./backups}
 TS=$(date +%Y%m%d-%H%M%S)
 WORK=$(mktemp -d)

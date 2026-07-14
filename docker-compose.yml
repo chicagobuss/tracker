@@ -1,47 +1,78 @@
-# Pinned project name so the stack is recognized regardless of directory
-# (matches the existing coord-postgres container + coord_pgdata volume).
-name: coord
+# Default stack: Postgres + tracker on a private bridge network, with tracker's
+# port published on BIND_ADDR (127.0.0.1 by default). This works identically on
+# Linux, macOS, and Windows.
+#
+#   cp .env.example .env && docker compose up -d
+#
+# It pulls a prebuilt image from GHCR — no Go toolchain, no build wait. To build
+# from source instead (contributors), add the build override:
+#
+#   docker compose -f docker-compose.yml -f compose.build.yml up -d --build
+#
+# To bind several host interfaces at once (LAN + Tailscale/ZeroTier), use Linux
+# host networking instead:
+#
+#   docker compose -f docker-compose.yml -f compose.host.yml up -d
+name: tracker
 
 services:
   postgres:
     image: pgvector/pgvector:pg17
-    container_name: coord-postgres
+    container_name: tracker-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${PGUSER:-coord}
-      POSTGRES_PASSWORD: ${PGPASSWORD:-coord}
-      POSTGRES_DB: ${PGDATABASE:-coord}
-    # Loopback only: the host-networked tracker reaches Postgres via 127.0.0.1.
-    # To expose it on another interface (e.g. your ZeroTier IP), add the bind in
-    # a compose.override.yml — a hardcoded IP here breaks any host that lacks it.
-    ports:
-      - "127.0.0.1:5432:5432"
+      POSTGRES_USER: ${PGUSER:-tracker}
+      POSTGRES_PASSWORD: ${PGPASSWORD:-tracker}
+      POSTGRES_DB: ${PGDATABASE:-tracker}
+    # Not published to the host at all: only the tracker container needs it, and
+    # it reaches Postgres over the compose network. Uncomment to inspect with a
+    # local psql.
+    # ports:
+    #   - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${PGUSER:-coord} -d ${PGDATABASE:-coord}"]
+      test: ["CMD-SHELL", "pg_isready -U ${PGUSER:-tracker} -d ${PGDATABASE:-tracker}"]
       interval: 5s
       timeout: 3s
       retries: 10
 
   tracker:
-    build:
-      context: .
-      args:
-        VERSION: ${TRACKER_VERSION:-dev}
-    image: tracker:local
-    container_name: coord-tracker
+    image: ${TRACKER_IMAGE:-ghcr.io/chicagobuss/tracker:latest}
+    container_name: tracker
     restart: unless-stopped
-    # Host networking: binds the same loopback/LAN/ZeroTier IPs as before and
-    # reaches Postgres (127.0.0.1:5432) and RustFS (192.168.1.100:9000) on the host.
-    network_mode: host
-    env_file: .env
+    env_file:
+      # Optional: every value below has a working default, so a bare
+      # `docker compose up -d` works on a fresh clone with no .env yet.
+      - path: .env
+        required: false
+    environment:
+      # Set here rather than in .env because they are properties of *this*
+      # topology, not of the deployment: on the compose network Postgres is the
+      # `postgres` service, and the server listens on all interfaces inside its
+      # own network namespace. Exposure is controlled by the port binding below,
+      # not by the in-container bind address.
+      DATABASE_URL: postgres://${PGUSER:-tracker}:${PGPASSWORD:-tracker}@postgres:5432/${PGDATABASE:-tracker}?sslmode=disable
+      LISTEN_ADDR: 0.0.0.0:8770
+    ports:
+      # Loopback-only by default. Set BIND_ADDR to a LAN/Tailscale/ZeroTier IP to
+      # let other machines reach tracker — and set API_TOKENS when you do. Set
+      # PORT if 8770 is already taken on this machine.
+      - "${BIND_ADDR:-127.0.0.1}:${PORT:-8770}:8770"
     volumes:
-      # If STORAGE_TYPE=file, map the host's ./data/blobs into the container so
-      # the flat files persist across restarts. The container target must be
-      # absolute; the binary's workdir is /, so BLOB_DIR=./data/blobs resolves
-      # to /data/blobs and matches this mount.
+      # For STORAGE_TYPE=file, persist blobs on the host. The container's workdir
+      # is /, so the default BLOB_DIR=./data/blobs resolves to /data/blobs.
       - ./data/blobs:/data/blobs
+    # Compose reports "Started" as soon as the container exists, but tracker still
+    # has to reach Postgres and run migrations before it serves. Without this,
+    # anything run straight after `up` (a smoke test, an agent, CI) races the boot.
+    # With it, `docker compose up -d --wait` blocks until tracker is really up.
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8770/healthz"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 3s
     depends_on:
       postgres:
         condition: service_healthy

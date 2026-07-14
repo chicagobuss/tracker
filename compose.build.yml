@@ -1,0 +1,14 @@
+# Build tracker from the working tree instead of pulling the GHCR image.
+# For contributors and for testing local changes:
+#
+#   docker compose -f docker-compose.yml -f compose.build.yml up -d --build
+#
+# `make deploy` does exactly this, with the version stamped from git describe.
+services:
+  tracker:
+    build:
+      context: .
+      args:
+        VERSION: ${TRACKER_VERSION:-dev}
+    image: tracker:local
+    pull_policy: never

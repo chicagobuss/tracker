@@ -16,6 +16,22 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      # The lease/CAS and SKIP LOCKED tests run against a real database; pgvector
+      # because migrations create the vector extension. Without TEST_DATABASE_URL
+      # they'd skip, so this service is what makes CI actually cover them.
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: tracker_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -28,7 +44,9 @@ jobs:
       - name: build
         run: go build ./...
       - name: test
-        run: go test ./...
+        env:
+          TEST_DATABASE_URL: postgres://postgres:test@127.0.0.1:5432/tracker_test?sslmode=disable
+        run: go test -race ./...
 
   image:
     needs: test

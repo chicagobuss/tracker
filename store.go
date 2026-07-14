@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -31,6 +32,7 @@ var migrationsFS embed.FS
 // Sentinel errors mapped to HTTP status codes by the handlers.
 var (
 	ErrNotFound        = errors.New("not found")
+	ErrAlreadyExists   = errors.New("already exists")
 	ErrLeaseHeld       = errors.New("lease held by another agent")
 	ErrNoLease         = errors.New("caller does not hold a valid lease")
 	ErrVersionConflict = errors.New("version conflict")
@@ -41,6 +43,17 @@ var (
 	ErrConfirmMismatch = errors.New("hard-delete confirm must exactly equal the document slug")
 	ErrFolioNotEmpty   = errors.New("folio still has files; pass cascade=true or delete files first")
 )
+
+// normalizeCreateError turns Postgres's unique-index error into a stable
+// domain error. Callers can then safely distinguish an idempotent create from
+// a real server failure without depending on a database error string.
+func normalizeCreateError(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		return ErrAlreadyExists
+	}
+	return err
+}
 
 type Document struct {
 	ID          string          `json:"id"`
@@ -288,7 +301,7 @@ func (s *Store) CreateDocument(ctx context.Context, slug, title, kind string, ta
 		if err == nil {
 			s.touchActor(ctx, by)
 		}
-		return doc, err
+		return doc, normalizeCreateError(err)
 	}
 
 	// Seed initial content: blob first (content-addressed), then the row + v1 revision.
@@ -315,7 +328,7 @@ func (s *Store) CreateDocument(ctx context.Context, slug, title, kind string, ta
 		contentType, int64(len(content)), by, string(content))
 	doc, err := scanDoc(row)
 	if err != nil {
-		return nil, err
+		return nil, normalizeCreateError(err)
 	}
 	if _, err := tx.Exec(ctx, `
 		insert into document_revisions (document_id, version, content_key, content_hash, size_bytes, author)
@@ -590,8 +603,14 @@ func (s *Store) AcquireLease(ctx context.Context, docID, owner, reason string, t
 
 	switch {
 	case found && cur.ExpiresAt.After(now) && cur.LeaseToken == leaseToken && leaseToken != "":
-		// Renew: same holder, valid token.
-		_, err = tx.Exec(ctx, `update doc_locks set renewed_at = now(), expires_at = $2, reason = $3 where document_id = $1`, realID, expires, reason)
+		// Renew: same holder, valid token. RETURNING the new timestamps matters —
+		// without it the caller gets back the pre-renewal expires_at and can
+		// believe a freshly renewed lease is about to lapse.
+		err = tx.QueryRow(ctx, `
+			update doc_locks set renewed_at = now(), expires_at = $2, reason = $3
+			where document_id = $1
+			returning acquired_at, renewed_at, expires_at`, realID, expires, reason).
+			Scan(&cur.AcquiredAt, &cur.RenewedAt, &cur.ExpiresAt)
 	case found && cur.ExpiresAt.After(now):
 		// Live lease held by someone else (or no/wrong token): denied.
 		return &cur, ErrLeaseHeld
@@ -654,7 +673,7 @@ func (s *Store) ReleaseLease(ctx context.Context, docID, leaseToken string) erro
 	return nil
 }
 
-// WriteContent stores bytes in RustFS (content-addressed) then atomically bumps
+// WriteContent stores bytes in the blob store (content-addressed) then atomically bumps
 // the document version, requiring (a) a live lease held by the caller and
 // (b) baseVersion to match the current version (optimistic CAS).
 func (s *Store) WriteContent(ctx context.Context, docID, owner, leaseToken string, baseVersion int, contentType string, data []byte) (*Document, error) {

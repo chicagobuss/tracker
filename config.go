@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"fmt"
 	"os"
 	"strings"
 	"time"
@@ -29,14 +30,16 @@ type Config struct {
 
 func loadConfig() Config {
 	c := Config{
-		DatabaseURL: env("DATABASE_URL", "postgres://coord:coord@127.0.0.1:5432/coord?sslmode=disable"),
+		DatabaseURL: env("DATABASE_URL", "postgres://tracker:tracker@127.0.0.1:5432/tracker?sslmode=disable"),
 		StorageType: env("STORAGE_TYPE", "file"),
 		BlobDir:     env("BLOB_DIR", "./data/blobs"),
-		BaseURL:     env("BASE_URL", "http://127.0.0.1:8080"),
-		S3Endpoint:  env("S3_ENDPOINT", "192.168.1.100:9000"),
-		S3AccessKey: env("S3_ACCESS_KEY", "admin"),
-		S3SecretKey: env("S3_SECRET_KEY", "adminpassword"),
-		S3Bucket:    env("S3_BUCKET", "coord-docs"),
+		BaseURL:     env("BASE_URL", "http://127.0.0.1:8770"),
+		// No S3 defaults on purpose: a half-configured S3 backend should fail
+		// with "S3_ENDPOINT is not set", not by dialing someone else's host.
+		S3Endpoint:  env("S3_ENDPOINT", ""),
+		S3AccessKey: env("S3_ACCESS_KEY", ""),
+		S3SecretKey: env("S3_SECRET_KEY", ""),
+		S3Bucket:    env("S3_BUCKET", ""),
 		S3UseSSL:    env("S3_USE_SSL", "false") == "true",
 		APITokens:   map[string]bool{},
 	}
@@ -55,12 +58,49 @@ func loadConfig() Config {
 			c.APITokens[t] = true
 		}
 	}
-	for _, a := range strings.Split(env("LISTEN_ADDR", "127.0.0.1:8080"), ",") {
+	for _, a := range strings.Split(env("LISTEN_ADDR", "127.0.0.1:8770"), ",") {
 		if a = strings.TrimSpace(a); a != "" {
 			c.ListenAddrs = append(c.ListenAddrs, a)
 		}
 	}
 	return c
+}
+
+// validate rejects a config that can't work, naming the exact env var to fix.
+// Misconfiguration should fail at startup with a readable message rather than as
+// a connection timeout to a half-configured backend.
+func (c Config) validate() error {
+	return c.validateStorage(c.StorageType, c.BlobDir)
+}
+
+// validateStorage checks the settings one blob backend needs. It takes the
+// backend explicitly because migrate-blobs uses two at once (source and
+// destination), either of which may be S3.
+func (c Config) validateStorage(storageType, blobDir string) error {
+	switch storageType {
+	case "file":
+		if blobDir == "" {
+			return fmt.Errorf("file blob storage requires BLOB_DIR (e.g. ./data/blobs)")
+		}
+	case "s3":
+		var missing []string
+		for _, kv := range []struct{ k, v string }{
+			{"S3_ENDPOINT", c.S3Endpoint},
+			{"S3_ACCESS_KEY", c.S3AccessKey},
+			{"S3_SECRET_KEY", c.S3SecretKey},
+			{"S3_BUCKET", c.S3Bucket},
+		} {
+			if kv.v == "" {
+				missing = append(missing, kv.k)
+			}
+		}
+		if len(missing) > 0 {
+			return fmt.Errorf("s3 blob storage requires %s (unset)", strings.Join(missing, ", "))
+		}
+	default:
+		return fmt.Errorf("STORAGE_TYPE must be \"file\" or \"s3\", got %q", storageType)
+	}
+	return nil
 }
 
 func env(k, def string) string {

@@ -7,7 +7,7 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags "-X main.version=${VERSION}" -o /tracker .
 
-FROM alpine:3.20
+FROM alpine:3.22
 RUN apk add --no-cache ca-certificates
 COPY --from=build /tracker /usr/local/bin/tracker
 ENTRYPOINT ["tracker"]

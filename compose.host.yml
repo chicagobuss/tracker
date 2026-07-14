@@ -1,0 +1,33 @@
+# Linux host-networking override: tracker binds host interfaces directly, so it
+# can serve several at once (loopback + LAN + Tailscale/ZeroTier) from the one
+# LISTEN_ADDR list in .env, and can reach services on the host (e.g. an existing
+# Postgres or a RustFS/MinIO blob store).
+#
+#   docker compose -f docker-compose.yml -f compose.host.yml up -d
+#
+# Requires Linux — `network_mode: host` is a no-op on Docker Desktop
+# (macOS/Windows), where the default bridge compose is the right choice.
+#
+# Set LISTEN_ADDR (and API_TOKENS — you are exposing this beyond loopback) in
+# .env. Postgres is published on loopback so the host-networked tracker can
+# reach it at 127.0.0.1:5432.
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:5432:5432"
+
+  tracker:
+    network_mode: host
+    # Host networking has no port publishing: the process binds LISTEN_ADDR itself.
+    ports: !reset []
+    # The default healthcheck probes 127.0.0.1:8770, which only works if LISTEN_ADDR
+    # happens to include loopback. In host mode it may legitimately not, and a
+    # false "unhealthy" would stall `--wait`, so don't guess — use scripts/smoke.sh
+    # to verify a host-mode instance instead.
+    healthcheck:
+      disable: true
+    environment:
+      # Postgres is on the host's loopback now, not a compose-network service.
+      DATABASE_URL: postgres://${PGUSER:-tracker}:${PGPASSWORD:-tracker}@127.0.0.1:5432/${PGDATABASE:-tracker}?sslmode=disable
+      # Fall back to loopback if .env doesn't pin the interface list.
+      LISTEN_ADDR: ${LISTEN_ADDR:-127.0.0.1:8770}

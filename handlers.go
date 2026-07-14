@@ -38,6 +38,8 @@ func writeErr(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, ErrNotFound):
 		writeError(w, http.StatusNotFound, "not_found", err.Error(), nil)
+	case errors.Is(err, ErrAlreadyExists):
+		writeError(w, http.StatusConflict, "already_exists", err.Error(), nil)
 	case errors.Is(err, ErrLeaseHeld):
 		writeError(w, http.StatusConflict, "lease_held", err.Error(), nil)
 	case errors.Is(err, ErrNoLease):

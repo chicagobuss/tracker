@@ -1,7 +1,19 @@
 .git
+.github
+
+# Never sweep state into the build context: with STORAGE_TYPE=file, data/ is every
+# document ever written, and backups/ holds tarballs containing full DB dumps. The
+# Dockerfile does `COPY . .`, so without these they land in a build layer.
+data/
+backups/
 pgdata/
+
+# Built binary (the image builds its own).
 tracker
-trackerd
 *.log
 .env
 .env.*
+!.env.example
+
+__pycache__/
+*.pyc

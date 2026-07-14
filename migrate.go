@@ -58,6 +58,13 @@ Flags:
 	if src == dst && (dst != "file" || dstDir == cfg.BlobDir) {
 		log.Fatalf("migrate-blobs: source and destination are the same (%s) — nothing to do", dst)
 	}
+	// Both ends must be fully configured before we touch a single blob.
+	if err := cfg.validateStorage(src, cfg.BlobDir); err != nil {
+		log.Fatalf("migrate-blobs: source %s: %v", src, err)
+	}
+	if err := cfg.validateStorage(dst, dstDir); err != nil {
+		log.Fatalf("migrate-blobs: destination %s: %v", dst, err)
+	}
 
 	ctx := context.Background()
 	db, err := pgxpool.New(ctx, cfg.DatabaseURL)

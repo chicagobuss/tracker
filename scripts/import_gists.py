@@ -7,7 +7,7 @@ content seeded. Idempotent: a folio whose slug already exists is skipped.
 
 GitHub data is read via the `gh` CLI (uses your existing auth). Usage:
 
-    python3 import_gists.py [--since-days 365] [--tracker http://127.0.0.1:8080] \
+    python3 import_gists.py [--since-days 365] [--tracker http://127.0.0.1:8770] \
                             [--actor importer] [--dry-run]
 """
 import argparse, datetime, json, re, subprocess, sys
@@ -53,7 +53,7 @@ def fetch_raw(url, token):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--since-days", type=int, default=365)
-    ap.add_argument("--tracker", default="http://127.0.0.1:8080")
+    ap.add_argument("--tracker", default="http://127.0.0.1:8770")
     ap.add_argument("--actor", default="importer")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()

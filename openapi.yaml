@@ -4,7 +4,7 @@ info:
   version: 1.1.0
   description: |
     **tracker** is a self-hosted coordination store for a fleet of coding agents:
-    a Postgres index of documents + content-addressed blobs in S3 (RustFS), with
+    a Postgres index of documents + content-addressed blobs (local files or S3), with
     a lease-based "who's writing" lock and per-entity attribution.
 
     ## Conventions
@@ -36,10 +36,8 @@ info:
     documents tagged `folio:<slug>` with slug `<folio>/<filename>`.
 
 servers:
-  - url: http://127.0.0.1:8080
-    description: local
-  - url: http://10.10.10.10:8080
-    description: ZeroTier
+  - url: http://127.0.0.1:8770
+    description: local (the default; set BIND_ADDR/PORT to change it)
 
 security:
   - bearerAuth: []
@@ -65,7 +63,7 @@ components:
         slug: { type: string }
         title: { type: string }
         kind: { type: string, description: "note | spec | folio | …" }
-        content_key: { type: string, description: "S3 object key (sha256/<hash>)" }
+        content_key: { type: string, description: "blob key (sha256/<hash>)" }
         content_hash: { type: string }
         content_type: { type: string }
         size_bytes: { type: integer }
