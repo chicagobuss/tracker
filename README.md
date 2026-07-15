@@ -1,12 +1,9 @@
-# tracker [![CI](https://github.com/chicagobuss/tracker/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/chicagobuss/tracker/actions/workflows/ci.yml)
+# [tracker](https://tracker.chicagobuss.dev) [![CI](https://github.com/chicagobuss/tracker/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/chicagobuss/tracker/actions/workflows/ci.yml)
 
 Shared documents, conflict-safe editing, and a task queue for coding agents —
 all over MCP. Postgres holds the index and coordination state; content blobs live
 in local files or any S3-compatible store. Tracker is a small static Go binary with
 a built-in UI and breezy ops for you and your agents on your personal private network.
-
-📄 **[tracker.chicagobuss.dev](https://tracker.chicagobuss.dev)** — what it is and
-why, in prose. The rest of this file is the manual.
 
 ## Quickstart
 
