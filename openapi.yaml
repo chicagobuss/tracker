@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: tracker API
-  version: 1.1.0
+  version: 1.3.0
   description: |
     **tracker** is a self-hosted coordination store for a fleet of coding agents:
     a Postgres index of documents + content-addressed blobs (local files or S3), with
