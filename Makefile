@@ -2,8 +2,11 @@
 # sha, with -dirty when the tree has uncommitted changes.
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-# Build from source rather than pulling the published image.
-BUILD := -f docker-compose.yml -f compose.build.yml
+# Build from source rather than pulling the published image. If .env pins a
+# custom stack via COMPOSE_FILE, pass no -f flags so compose honors that pin
+# (explicit -f would silently override it). Still overridable: make deploy BUILD=...
+COMPOSE_FILE_PINNED := $(shell sed -n 's/^COMPOSE_FILE=//p' .env 2>/dev/null)
+BUILD ?= $(if $(COMPOSE_FILE_PINNED),,-f docker-compose.yml -f compose.build.yml)
 
 .PHONY: help up down logs smoke build image deploy version test test-docker clean
 

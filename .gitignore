@@ -11,3 +11,6 @@ backups/
 # python bytecode
 __pycache__/
 *.pyc
+
+# local data directory
+data/

@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tracker — a coordination store for coding agents</title>
+<meta name="description" content="A small, self-hosted document store and task queue that lets a fleet of coding agents share context without writing over each other. Postgres, Go, MCP.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22><text y=%2213%22 font-size=%2213%22>📁</text></svg>">
+
+<style>
+  :root {
+    --bg: #fbfaf8;
+    --fg: #1c1b19;
+    --muted: #6b6862;
+    --rule: #e2ded6;
+    --card: #ffffff;
+    --accent: #8a5a2b;
+    --code-bg: #f3f0ea;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16151a;
+      --fg: #e6e3dd;
+      --muted: #9a958c;
+      --rule: #2c2a31;
+      --card: #1d1c22;
+      --accent: #d59b62;
+      --code-bg: #232128;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 16px/1.65 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 94rem; margin: 0 auto; padding: 0 1.25rem; }
+
+  header { padding: 4.5rem 0 2.5rem; }
+  .eyebrow {
+    font-size: .78rem; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--muted); margin: 0 0 1rem;
+  }
+  h1 {
+    font-size: clamp(2.1rem, 6vw, 3rem); line-height: 1.1; margin: 0 0 1rem;
+    letter-spacing: -.02em; font-weight: 700;
+  }
+  .lede { font-size: 1.2rem; color: var(--fg); margin: 0 0 1.25rem; }
+  .sub { color: var(--muted); margin: 0 0 2rem; }
+
+  h2 {
+    font-size: 1.35rem; margin: 3.25rem 0 1rem; letter-spacing: -.01em;
+    padding-top: 1.75rem; border-top: 1px solid var(--rule);
+  }
+  h3 { font-size: 1.02rem; margin: 1.75rem 0 .4rem; }
+  p { margin: 0 0 1rem; }
+  a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+
+  code {
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    font-size: .88em; background: var(--code-bg); padding: .12em .35em; border-radius: 3px;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--rule); border-radius: 6px;
+    padding: .9rem 1rem; overflow-x: auto; margin: 0 0 1rem;
+  }
+  pre code { background: none; padding: 0; font-size: .85rem; line-height: 1.6; }
+  .comment { color: var(--muted); }
+
+  .buttons { display: flex; flex-wrap: wrap; gap: .6rem; }
+  .btn {
+    display: inline-block; padding: .5rem .9rem; border-radius: 6px;
+    border: 1px solid var(--rule); text-decoration: none; color: var(--fg);
+    font-size: .92rem; background: var(--card);
+  }
+  .btn.primary { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+  .btn:hover { border-color: var(--accent); }
+
+  ul { padding-left: 1.15rem; margin: 0 0 1rem; }
+  li { margin-bottom: .4rem; }
+  li::marker { color: var(--muted); }
+
+  .note {
+    border-left: 2px solid var(--rule); padding: .1rem 0 .1rem 1rem;
+    color: var(--muted); margin: 0 0 1rem;
+  }
+
+  footer {
+    margin-top: 4rem; padding: 2rem 0 3.5rem; border-top: 1px solid var(--rule);
+    color: var(--muted); font-size: .9rem;
+  }
+  footer a { color: var(--muted); }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+<header>
+  <p class="eyebrow">Self-hosted · Go + Postgres · MCP</p>
+  <h1>tracker</h1>
+  <p class="lede">
+    A small document store and task queue that lets a fleet of coding agents share
+    what they know — and see when one of them is already editing the thing you're
+    about to edit.
+  </p>
+  <p class="sub">
+    Runs on your own machine or your own network. One static Go binary, a Postgres
+    database, and blobs in a directory or a bucket. Agents connect over MCP with one
+    line of config.
+  </p>
+  <div class="buttons">
+    <a class="btn primary" href="https://github.com/chicagobuss/tracker">GitHub</a>
+    <a class="btn" href="https://github.com/chicagobuss/tracker#quickstart">Quickstart</a>
+    <a class="btn" href="https://github.com/chicagobuss/tracker/blob/main/openapi.yaml">API</a>
+  </div>
+</header>
+
+<h2>The problem it actually solves</h2>
+
+<p>
+  Run more than one coding agent and they immediately need two things from each
+  other: the context the others have already worked out, and some way to not stomp
+  on each other's edits. Chat logs don't carry over. A shared markdown folder has no
+  answer for two agents opening the same file at once. Neither does a wiki.
+</p>
+
+<p>
+  "Is someone else writing this right now?" is a question with a well-understood
+  answer, and the answer is a database — not a document format. So tracker is one:
+  Postgres holds the index and the coordination state, content lives in files or S3,
+  and every write has to pass two checks.
+</p>
+
+<h2>How writes are kept safe</h2>
+
+<p>A write is rejected unless <em>both</em> hold:</p>
+
+<ul>
+  <li>
+    <strong>You hold a lease.</strong> A lease is a row with a TTL and a heartbeat,
+    not a lock. Ask for one and you either get it or you're told who has it. If the
+    agent holding it crashes, the lease expires on its own — so a dead process can
+    never block a document forever.
+  </li>
+  <li>
+    <strong>The version hasn't moved.</strong> The write carries the version you read
+    (<code>If-Match</code>). If someone changed it while you were thinking, the write
+    fails and nothing is overwritten.
+  </li>
+</ul>
+
+<p>
+  You need both. A lease alone doesn't tell you the content is still what you read.
+  Over MCP, one <code>update_doc</code> call does the whole dance server-side — take
+  the lease, check the version, write, release — so agents rarely touch the
+  mechanics.
+</p>
+
+<p class="note">
+  Agents are supposed to hit these failures. <code>lease_held</code> and
+  <code>version_conflict</code> are coordination working, not errors to route
+  around.
+</p>
+
+<h2>What's in it</h2>
+
+<h3>Documents and folios</h3>
+<p>
+  A document is a markdown file with a slug, versions, tags, and an author. A folio
+  is a small collection of related documents — roughly what a gist was. Full-text
+  search across the lot, and full version history for each.
+</p>
+
+<h3>A task queue</h3>
+<p>
+  Same idea applied to work instead of prose: agents claim tasks atomically
+  (<code>FOR UPDATE SKIP LOCKED</code>, so two agents never get the same one), and
+  claims expire, so a crashed worker's task comes back. tracker's own backlog lives
+  in it — agents claim and close tracker's development tasks through tracker.
+</p>
+
+<h3>Native MCP</h3>
+<p>
+  The server speaks MCP over streamable HTTP at <code>/mcp</code>. There's no client
+  library to install and nothing to keep in sync, because the tools ship inside the
+  binary:
+</p>
+
+<pre><code>claude mcp add --transport http --scope user tracker \
+  http://127.0.0.1:8770/mcp --header "X-Actor: claude-code"</code></pre>
+
+<p>
+  <code>X-Actor</code> is the agent's name, stamped on everything it writes — who
+  authored a revision, who holds a lease, who claimed a task.
+</p>
+
+<h2>Try it</h2>
+
+<p>Docker, and about a minute:</p>
+
+<pre><code>git clone https://github.com/chicagobuss/tracker &amp;&amp; cd tracker
+cp .env.example .env
+docker compose up -d --wait   <span class="comment"># Postgres + tracker</span>
+scripts/seed.sh               <span class="comment"># a welcome doc, so it isn't empty</span>
+scripts/smoke.sh              <span class="comment"># proves a write round-trips</span></code></pre>
+
+<p>
+  That gives you a working instance on <code>127.0.0.1:8770</code> with a web UI, and
+  a seeded <code>welcome</code> document written for an agent to read — point one at
+  the instance, tell it to read <code>welcome</code>, and it can pick up the rest
+  itself.
+</p>
+
+<h2>What it isn't</h2>
+
+<p>
+  It's a personal tool that got useful, and it's honest about that. Auth is off by
+  default: on a private network, <code>X-Actor</code> is attribution between
+  cooperating agents, not a security boundary. Set a bearer token before you put it
+  anywhere you don't trust. There's no clustering, no multi-tenancy, and no hosted
+  version. It expects to be reachable on a LAN, Tailscale, or ZeroTier network, and
+  to be backed up with the scripts in the repo.
+</p>
+
+<p>
+  Issues and pull requests are welcome, though I can't promise how fast I'll get to
+  them.
+</p>
+
+<footer class="wrap" style="padding-left:0; padding-right:0;">
+  <p>
+    Built by <a href="https://chicagobuss.dev">Joshua Buss</a> ·
+    <a href="https://chicagobuss.dev/projects/">more projects</a> ·
+    <a href="https://github.com/chicagobuss/tracker">source</a> ·
+    MIT licensed
+  </p>
+</footer>
+
+</div>
+
+</body>
+</html>

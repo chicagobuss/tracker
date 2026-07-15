@@ -7,16 +7,47 @@
 <script src="/static/marked.min.js"></script>
 <script src="/static/purify.min.js"></script>
 <style>
-  :root { --bg:#0f1115; --panel:#171a21; --border:#262b36; --fg:#d7dce5; --muted:#8a93a3; --accent:#6ea8fe; --lock:#e0a458; }
+  :root {
+    --bg:#0f1115;
+    --panel:#171a21;
+    --border:#262b36;
+    --fg:#d7dce5;
+    --muted:#8a93a3;
+    --accent:#6ea8fe;
+    --lock:#e0a458;
+    --input-bg:#0c0e12;
+    --btn-bg:#222733;
+    --btn-hover-bg:#2b3240;
+    --item-hover-bg:#1d2230;
+    --item-active-bg:#202739;
+    --link:#6ea8fe;
+    --link-visited:#c398ff;
+  }
+  :root.light-mode {
+    --bg:#f8f9fa;
+    --panel:#ffffff;
+    --border:#dee2e6;
+    --fg:#212529;
+    --muted:#6c757d;
+    --accent:#0d6efd;
+    --lock:#d97706;
+    --input-bg:#e9ecef;
+    --btn-bg:#f8f9fa;
+    --btn-hover-bg:#e9ecef;
+    --item-hover-bg:#f1f3f5;
+    --item-active-bg:#e8f0fe;
+    --link:#0d6efd;
+    --link-visited:#6f42c1;
+  }
   * { box-sizing: border-box; }
   body { margin:0; font:14px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; color:var(--fg); background:var(--bg); height:100vh; display:flex; flex-direction:column; }
   header { display:flex; gap:.6rem; align-items:center; padding:.55rem .8rem; background:var(--panel); border-bottom:1px solid var(--border); }
   header h1 { font-size:15px; margin:0 .5rem 0 0; font-weight:600; letter-spacing:.5px; }
-  header input { background:#0c0e12; border:1px solid var(--border); color:var(--fg); border-radius:6px; padding:.35rem .5rem; }
+  header input { background:var(--input-bg); border:1px solid var(--border); color:var(--fg); border-radius:6px; padding:.35rem .5rem; }
   #q { flex:1; }
   #token { width:170px; }
-  button { background:#222733; color:var(--fg); border:1px solid var(--border); border-radius:6px; padding:.35rem .6rem; cursor:pointer; }
-  button:hover { background:#2b3240; }
+  button { background:var(--btn-bg); color:var(--fg); border:1px solid var(--border); border-radius:6px; padding:.35rem .6rem; cursor:pointer; }
+  button:hover { background:var(--btn-hover-bg); }
   main { flex:1; display:flex; min-height:0; }
   #sidebar { width:300px; border-right:1px solid var(--border); display:flex; flex-direction:column; background:var(--panel); }
   #filter-container {
@@ -26,7 +57,7 @@
     flex-direction: column;
     gap: .4rem;
   }
-  #filter { width:100%; background:#0c0e12; border:1px solid var(--border); color:var(--fg); border-radius:6px; padding:.35rem .5rem; font-size:13px; }
+  #filter { width:100%; background:var(--input-bg); border:1px solid var(--border); color:var(--fg); border-radius:6px; padding:.35rem .5rem; font-size:13px; }
   .sort-controls {
     display: flex;
     gap: .4rem;
@@ -51,15 +82,16 @@
     font-size: 13px;
     border-radius: 6px;
     line-height: 1;
-    background: #0c0e12;
+    background: var(--input-bg);
     border: 1px solid var(--border);
   }
   #filter:focus { outline:none; border-color:var(--accent); }
   #list { flex:1; overflow:auto; }
   mark.highlight { background:rgba(110, 168, 254, 0.25); color:#9ec5fe; border-radius:2px; padding:0 1px; }
+  :root.light-mode mark.highlight { background:rgba(13, 110, 253, 0.15); color:var(--accent); }
   .item { padding:.5rem .7rem; border-bottom:1px solid var(--border); cursor:pointer; }
-  .item:hover { background:#1d2230; }
-  .item.active { background:#202739; border-left:2px solid var(--accent); }
+  .item:hover { background:var(--item-hover-bg); }
+  .item.active { background:var(--item-active-bg); border-left:2px solid var(--accent); }
   .item .title { font-weight:600; }
   .item .meta { color:var(--muted); font-size:12px; display:flex; gap:.4rem; align-items:center; flex-wrap:wrap; }
   .badge { font-size:10.5px; padding:.05rem .35rem; border-radius:4px; border:1px solid var(--border); color:var(--muted); }
@@ -67,11 +99,14 @@
   #view { flex:1; overflow:auto; padding:1.2rem 1.6rem; }
   #docmeta { color:var(--muted); font-size:12px; margin-bottom:1rem; padding-bottom:.6rem; border-bottom:1px solid var(--border); display:flex; gap:.7rem; flex-wrap:wrap; }
   .md h1,.md h2,.md h3 { line-height:1.25; }
-  .md pre { background:#0c0e12; border:1px solid var(--border); padding:.7rem; border-radius:6px; overflow:auto; }
-  .md code { background:#0c0e12; padding:.1rem .3rem; border-radius:4px; }
+  .md pre { background:var(--input-bg); border:1px solid var(--border); padding:.7rem; border-radius:6px; overflow:auto; }
+  .md code { background:var(--input-bg); padding:.1rem .3rem; border-radius:4px; }
   .md pre code { background:none; padding:0; }
   .md table { border-collapse:collapse; } .md th,.md td { border:1px solid var(--border); padding:.3rem .5rem; }
   .md blockquote { border-left:3px solid var(--border); margin:0; padding-left:.8rem; color:var(--muted); }
+  .md a { color: var(--link); text-decoration: none; }
+  .md a:hover { text-decoration: underline; }
+  .md a:visited { color: var(--link-visited); }
   .empty { color:var(--muted); margin-top:3rem; text-align:center; }
   .muted { color:var(--muted); }
   #histbtn { cursor:pointer; }
@@ -79,14 +114,14 @@
   #histpanel:not(:empty) { margin-bottom:1rem; border:1px solid var(--border); border-radius:6px; }
   .lrow { display:flex; gap:.6rem; align-items:center; padding:.35rem .55rem; border-bottom:1px solid var(--border); cursor:pointer; font-size:12.5px; }
   .lrow:last-child { border-bottom:0; }
-  .lrow:hover { background:#1d2230; }
-  .lrow.active { background:#202739; }
+  .lrow:hover { background:var(--item-hover-bg); }
+  .lrow.active { background:var(--item-active-bg); }
   .lrow .title { font-weight:600; }
   .badge.cur { color:var(--accent); border-color:var(--accent); }
   .segmented-control {
     display: flex;
     position: relative;
-    background: #0c0e12;
+    background: var(--input-bg);
     border: 1px solid var(--border);
     border-radius: 6px;
     padding: 2px;
@@ -120,7 +155,7 @@
     bottom: 2px;
     left: 2px;
     width: calc(50% - 2px);
-    background: #222733;
+    background: var(--btn-bg);
     border: 1px solid var(--border);
     border-radius: 4px;
     transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
@@ -131,8 +166,8 @@
     transform: translateX(100%);
   }
   .desc { color:var(--muted); font-size:12px; margin-top:.15rem; }
-  .oldbanner { background:#202739; border:1px solid var(--accent); padding:.4rem .65rem; border-radius:6px; margin-bottom:1rem; font-size:13px; }
-  .oldbanner a { color:var(--accent); cursor:pointer; }
+  .oldbanner { background:var(--item-active-bg); border:1px solid var(--accent); padding:.4rem .65rem; border-radius:6px; margin-bottom:1rem; font-size:13px; }
+  .oldbanner a { color:var(--link); cursor:pointer; }
   
   .folio-sublist {
     margin-top: .4rem;
@@ -154,15 +189,15 @@
   }
   .sub-item:hover {
     color: var(--fg);
-    background: #1d2230;
+    background: var(--item-hover-bg);
   }
   .sub-item.active {
     color: var(--accent);
-    background: #2b3240;
+    background: var(--btn-hover-bg);
     font-weight: 600;
   }
   .folio-file-card {
-    background: #171a21;
+    background: var(--panel);
     border: 1px solid var(--border);
     border-radius: 8px;
     padding: .8rem 1rem;
@@ -173,7 +208,7 @@
   .folio-file-card:hover {
     border-color: var(--accent);
     transform: translateY(-1px);
-    background: #1d2230;
+    background: var(--item-hover-bg);
   }
   .card-header {
     display: flex;
@@ -208,6 +243,7 @@
   <input id="q" placeholder="search…" autocomplete="off">
   <input id="token" placeholder="bearer token (if set)" autocomplete="off">
   <button id="help">? help</button>
+  <button id="theme-toggle" title="Toggle theme">☀️</button>
   <button id="refresh">↻</button>
 </header>
 <noscript>
@@ -253,8 +289,57 @@ async function api(path) {
   return r;
 }
 
-let active = null, activeFolio = null, scope = "all";
+let active = null, activeSlug = null, activeFolio = null, scope = "all";
 function human(n) { n = +n || 0; return n < 1024 ? n + " B" : (n / 1024).toFixed(1) + " kb"; }
+
+// --- routing -----------------------------------------------------------------
+// The URL mirrors what you're looking at, so a view can be shared or reopened on
+// another machine: #/doc/<slug> and #/folio/<slug>. Slugs, not UUIDs — a UUID in
+// a URL tells a human nothing. Hash-based because the SPA is only served at "/",
+// so a real path would 404 on reload.
+//
+// Folio-file slugs contain "/" (folio/file.md), so encode per segment: that keeps
+// the slash readable as a separator while still escaping spaces and the like.
+const encSlug = s => String(s).split("/").map(encodeURIComponent).join("/");
+const decSlug = s => String(s).split("/").map(decodeURIComponent).join("/");
+
+// setRoute is a no-op when the hash already says what we want. That's what lets
+// openDoc/openFolio be called both by a click (pushes history) and by applyRoute
+// while handling that very hash (pushes nothing) — no re-entrancy guard needed.
+function setRoute(hash) {
+  if (location.hash === hash) return;
+  history.pushState(null, "", hash || location.pathname + location.search);
+}
+
+// Drive the UI from the URL: on first load, and on back/forward.
+async function applyRoute() {
+  const m = /^#\/(doc|folio)\/(.+)$/.exec(location.hash);
+  if (!m) {
+    scope = "all"; $("#scope-all").checked = true;
+    active = activeSlug = activeFolio = null;
+    loadList();
+    showHelp();
+    return;
+  }
+  const [, kind, rawSlug] = m;
+  const slug = decSlug(rawSlug);
+  if (kind === "folio") {
+    scope = "folios"; $("#scope-folios").checked = true;
+    openFolio(slug);
+    return;
+  }
+  // A doc whose slug has a "/" is a folio file — show it in its folio's context,
+  // so a shared link to one lands you where you'd have been had you clicked in.
+  if (slug.includes("/")) {
+    scope = "folios"; $("#scope-folios").checked = true;
+    activeFolio = slug.split("/")[0];
+  } else {
+    scope = "all"; $("#scope-all").checked = true;
+    activeFolio = null;
+  }
+  openDoc(slug);
+}
+window.addEventListener("popstate", applyRoute);
 
 function highlight(text, search) {
   const escapedText = esc(text);
@@ -414,7 +499,7 @@ async function populateFolioSublist(slug, sublistEl) {
     sublistEl.innerHTML = "";
     for (const fl of files) {
       const subEl = document.createElement("div");
-      subEl.className = "sub-item" + (fl.id === active ? " active" : "");
+      subEl.className = "sub-item" + (fl.id === active || fl.slug === activeSlug ? " active" : "");
       subEl.innerText = "📄 " + (fl.title || fl.slug.split("/").pop());
       subEl.title = fl.slug;
       subEl.onclick = (e) => {
@@ -430,9 +515,9 @@ async function populateFolioSublist(slug, sublistEl) {
 }
 
 async function openDocInFolio(docId, folioSlug) {
-  active = docId;
   activeFolio = folioSlug;
-  loadFolios();
+  // openDoc refreshes the list (loadFolios, in this scope) once it knows the doc,
+  // so don't load it twice.
   openDoc(docId);
 }
 
@@ -446,7 +531,8 @@ async function loadList() {
     list.innerHTML = "";
     for (const d of documents) {
       const el = document.createElement("div");
-      el.className = "item" + (d.id === active ? " active" : "");
+      // Match on either: a click knows the UUID, a deep link only knows the slug.
+      el.className = "item" + (d.id === active || d.slug === activeSlug ? " active" : "");
       el._data = {
         type: "doc",
         title: d.title || d.slug,
@@ -508,7 +594,9 @@ async function loadFolios() {
 }
 
 async function openFolio(slug) {
-  activeFolio = slug; active = null; loadFolios();
+  activeFolio = slug; active = null; activeSlug = null;
+  setRoute("#/folio/" + encSlug(slug));
+  loadFolios();
   const view = $("#view");
   try {
     const { folio: f, files } = await (await api("/folios/" + encodeURIComponent(slug))).json();
@@ -566,12 +654,18 @@ async function openFolio(slug) {
   } catch (e) { view.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
 }
 
-async function openDoc(id) {
-  active = id;
-  loadList();
+// Takes a UUID (from a click) or a slug (from a URL) — the API resolves either.
+// We fetch first so we always learn the canonical slug, which is what the URL and
+// the list highlighting are keyed on.
+async function openDoc(idOrSlug) {
   const view = $("#view");
   try {
-    const { document: d, lock: lk } = await (await api("/docs/" + id)).json();
+    const { document: d, lock: lk } = await (await api("/docs/" + encSlug(idOrSlug))).json();
+    const id = d.id;
+    active = d.id;
+    activeSlug = d.slug;
+    setRoute("#/doc/" + encSlug(d.slug));
+    loadList();
     let body = "";
     if (d.content_key) {
       const raw = await (await api("/docs/" + id + "/raw")).text();
@@ -591,7 +685,12 @@ async function openDoc(id) {
       </div><div id="histpanel"></div><div id="docbody">${body}</div>`;
     const hb = $("#histbtn");
     if (hb) hb.onclick = () => toggleHistory(id);
-  } catch (e) { view.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+  } catch (e) {
+    view.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+    // A shared link can point at a doc that's gone (or that you can't read without
+    // a token). Still populate the list, or the page is a dead end.
+    loadList();
+  }
 }
 
 // History stays deliberately light: a collapsible list of versions; clicking one
@@ -634,7 +733,9 @@ function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","
 // The help panel renders the same /usage.md the server gives non-browser clients,
 // so there's one source of truth for "how to use tracker".
 async function showHelp() {
-  active = null; activeFolio = null; loadList();
+  active = null; activeSlug = null; activeFolio = null;
+  setRoute("");
+  loadList();
   let version = "";
   try { version = (await (await api("/version")).json()).version; } catch {}
   let md = "";
@@ -684,9 +785,31 @@ $("#sort-dir").onclick = () => {
 $("#refresh").onclick = () => { loadList(); if (active) openDoc(active); else if (activeFolio) openFolio(activeFolio); else showHelp(); };
 $("#help").onclick = showHelp;
 $("#home").onclick = showHelp;
+
+const themeToggle = $("#theme-toggle");
+function applyTheme(theme) {
+  if (theme === "light") {
+    document.documentElement.classList.add("light-mode");
+    themeToggle.innerText = "🌙";
+    themeToggle.title = "Switch to Dark Mode";
+  } else {
+    document.documentElement.classList.remove("light-mode");
+    themeToggle.innerText = "☀️";
+    themeToggle.title = "Switch to Light Mode";
+  }
+}
+const savedTheme = localStorage.getItem("tracker_theme") || (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+applyTheme(savedTheme);
+themeToggle.onclick = () => {
+  const isLight = document.documentElement.classList.contains("light-mode");
+  const nextTheme = isLight ? "dark" : "light";
+  localStorage.setItem("tracker_theme", nextTheme);
+  applyTheme(nextTheme);
+};
+
 marked.setOptions({ gfm: true, breaks: false });
-loadList();
-showHelp();
+// Start from the URL, so a shared link opens the thing it points at.
+applyRoute();
 </script>
 </body>
 </html>

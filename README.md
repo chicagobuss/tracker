@@ -5,6 +5,9 @@ all over MCP. Postgres holds the index and coordination state; content blobs liv
 in local files or any S3-compatible store. Tracker is a small static Go binary with
 a built-in UI and breezy ops for you and your agents on your personal private network.
 
+📄 **[tracker.chicagobuss.dev](https://tracker.chicagobuss.dev)** — what it is and
+why, in prose. The rest of this file is the manual.
+
 ## Quickstart
 
 Needs Docker Compose, Bash, curl, and Python 3. No Go toolchain or build is
@@ -339,6 +342,9 @@ local directory" is just where you keep it.
 ```bash
 scripts/backup.sh                 # -> ./backups/tracker-backup-<ts>.tar.gz
 scripts/backup.sh --upload        # also push to R2/S3 (set BACKUP_S3_* in .env)
+scripts/backup.sh --if-changed    # skip entirely if no content changed (for cron)
+# hourly, only when something changed (BACKUP_KEEP prunes local tarballs, default 48):
+#   7 * * * * /path/to/tracker/scripts/backup.sh --if-changed --upload >> /path/to/tracker/backups/backup.log 2>&1
 
 scripts/restore.sh ./backups/tracker-backup-<ts>.tar.gz   # from a local file
 scripts/restore.sh --from-s3 tracker-backup-<ts>.tar.gz   # pull from R2/S3 first
@@ -420,7 +426,7 @@ task-claim state machines.
 
   ### Ops
 
-  - Scheduled off-box backups — schedule scripts/backup.sh --upload to R2/S3
+  - ~~Scheduled off-box backups~~ — done: cron scripts/backup.sh --if-changed --upload
     with retention, and add automated restore verification against manifest
     document/blob counts.
 
