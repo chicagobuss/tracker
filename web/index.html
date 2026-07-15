@@ -339,7 +339,11 @@ async function applyRoute() {
   }
   openDoc(slug);
 }
+// popstate covers back/forward and fresh loads; hashchange covers a link pasted
+// into the URL bar of an already-open tab. setRoute's no-op guard keeps the two
+// from looping when applyRoute itself sets the hash.
 window.addEventListener("popstate", applyRoute);
+window.addEventListener("hashchange", applyRoute);
 
 function highlight(text, search) {
   const escapedText = esc(text);
