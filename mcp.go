@@ -388,18 +388,22 @@ var mcpTools = map[string]mcpTool{
 		},
 	},
 	"retag_doc": {
-		desc:     "Change a document's tags/metadata/title WITHOUT rewriting content (no lease, version unchanged). Use namespaced tags: topic:x, kind:x, status:x.",
+		desc:     "Change a document's tags/metadata/title/kind WITHOUT rewriting content (no lease, version unchanged). Use namespaced tags: topic:x, status:x.",
 		mutating: true,
 		schema: obj([]string{"id"}, map[string]any{"id": pStr, "add_tags": pStrs, "remove_tags": pStrs,
-			"tags": pStrs, "metadata": pObj, "title": pStr}),
+			"tags": pStrs, "metadata": pObj, "title": pStr, "kind": pStr}),
 		fn: func(ctx context.Context, s *Server, actor string, a targs) (any, error) {
 			var title *string
 			if t, ok := a["title"].(string); ok {
 				title = &t
 			}
+			var kind *string
+			if k, ok := a["kind"].(string); ok {
+				kind = &k
+			}
 			doc, err := s.store.PatchDocument(ctx, a.str("id"), DocPatch{
 				Tags: a.strs("tags"), AddTags: a.strs("add_tags"), RemoveTags: a.strs("remove_tags"),
-				Metadata: a.raw("metadata"), Title: title,
+				Metadata: a.raw("metadata"), Title: title, Kind: kind,
 			}, actor)
 			if err != nil {
 				return nil, err

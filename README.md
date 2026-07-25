@@ -172,7 +172,7 @@ out of sync.
 
 Tools: `list_docs` (incl. `deleted=exclude|only|include`), `get_doc`, `get_raw`,
 `create_doc`, `update_doc` (lease + version-check + release, for you),
-`lock_status`, `retag_doc` (tags/metadata without a content rewrite),
+`lock_status`, `retag_doc` (tags/metadata/title/kind without a content rewrite),
 `soft_delete_doc` / `restore_doc` / `hard_delete_doc` (hard delete requires
 `confirm` equal to the slug), `list_tags`, `list_folios`, `create_folio`,
 `get_folio`, `get_folio_file`, `add_folio_file`, the task-queue tools

@@ -232,7 +232,7 @@ paths:
         "412": { description: "version_conflict", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
         "423": { description: "no_lease (you don't hold the lease)", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
     patch:
-      summary: Relabel — change tags/metadata/title without rewriting content
+      summary: Relabel — change tags/metadata/title/kind without rewriting content
       description: "Labels are not content: no lease, no content rewrite, no version bump. Requires only X-Actor for attribution."
       parameters: [ { $ref: '#/components/parameters/Actor' } ]
       requestBody:
@@ -247,6 +247,7 @@ paths:
                 tags: { type: array, items: { type: string }, description: "replace the whole tag set" }
                 metadata: { type: object, description: "shallow-merged into existing metadata" }
                 title: { type: string }
+                kind: { type: string }
       responses:
         "200": { description: relabelled, content: { application/json: { schema: { type: object, properties: { document: { $ref: '#/components/schemas/Document' } } } } } }
         "404": { $ref: '#/components/responses/NotFound' }

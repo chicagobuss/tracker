@@ -414,7 +414,7 @@ func (s *Store) ListDocuments(ctx context.Context, q, kind, tag, mode, deleted s
 	return out, total, rows.Err()
 }
 
-// DocPatch carries label-only changes: tags and metadata (and optionally title).
+// DocPatch carries label-only changes: tags, metadata, title, and kind.
 // These are NOT content, so applying them never bumps the version, rewrites a
 // blob, or requires a lease.
 type DocPatch struct {
@@ -423,9 +423,10 @@ type DocPatch struct {
 	RemoveTags []string        // tags to drop
 	Metadata   json.RawMessage // shallow-merged into existing metadata when non-nil
 	Title      *string         // replaces the title when non-nil
+	Kind       *string         // replaces the kind when non-nil
 }
 
-// PatchDocument mutates a document's labels (tags / metadata / title) without
+// PatchDocument mutates a document's labels (tags / metadata / title / kind) without
 // touching its content. Deliberately does not bump version, rewrite the blob, or
 // require a lease — tags and metadata are labels, not content. (fts is left as-is;
 // a changed title reindexes on the next content write.) Requires only an actor
@@ -437,12 +438,12 @@ func (s *Store) PatchDocument(ctx context.Context, idOrSlug string, p DocPatch, 
 	}
 	defer tx.Rollback(ctx)
 
-	var id, title, contentKey string
+	var id, title, kind, contentKey string
 	var tags []string
 	var meta json.RawMessage
 	var deletedAt *time.Time
-	err = tx.QueryRow(ctx, `select id, title, tags, metadata, coalesce(content_key,''), deleted_at from documents where `+idClause+` for update`, idOrSlug).
-		Scan(&id, &title, &tags, &meta, &contentKey, &deletedAt)
+	err = tx.QueryRow(ctx, `select id, title, kind, tags, metadata, coalesce(content_key,''), deleted_at from documents where `+idClause+` for update`, idOrSlug).
+		Scan(&id, &title, &kind, &tags, &meta, &contentKey, &deletedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	} else if err != nil {
@@ -463,8 +464,11 @@ func (s *Store) PatchDocument(ctx context.Context, idOrSlug string, p DocPatch, 
 	if len(p.Metadata) > 0 {
 		meta = withMeta(meta, rawToMap(p.Metadata))
 	}
+	if p.Kind != nil && strings.TrimSpace(*p.Kind) != "" {
+		kind = strings.TrimSpace(*p.Kind)
+	}
 	ftsSet := ``
-	args := []any{id, tags, string(meta), title, by}
+	args := []any{id, tags, string(meta), title, kind, by}
 	if p.Title != nil && *p.Title != title {
 		// A renamed doc must be findable under its NEW title, so reindex fts —
 		// which means re-reading the content text the index also covers.
@@ -477,13 +481,13 @@ func (s *Store) PatchDocument(ctx context.Context, idOrSlug string, p DocPatch, 
 			}
 			ftsInput += " " + text
 		}
-		ftsSet = `, fts = to_tsvector('english', $6)`
-		args = []any{id, tags, string(meta), title, by, ftsInput}
+		ftsSet = `, fts = to_tsvector('english', $7)`
+		args = []any{id, tags, string(meta), title, kind, by, ftsInput}
 	}
 
 	row := tx.QueryRow(ctx, `
-		update documents set tags = $2, metadata = $3::jsonb, title = $4,
-			updated_by = $5, updated_at = now()`+ftsSet+`
+		update documents set tags = $2, metadata = $3::jsonb, title = $4, kind = $5,
+			updated_by = $6, updated_at = now()`+ftsSet+`
 		where id = $1
 		returning `+docSelect, args...)
 	doc, err := scanDoc(row)

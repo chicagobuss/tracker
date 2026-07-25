@@ -327,14 +327,15 @@ func (s *Server) patchDoc(w http.ResponseWriter, r *http.Request) {
 		RemoveTags []string        `json:"remove_tags"`
 		Metadata   json.RawMessage `json:"metadata"`
 		Title      *string         `json:"title"`
+		Kind       *string         `json:"kind"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		badRequest(w, "json body required (tags / add_tags / remove_tags / metadata / title)")
+		badRequest(w, "json body required (tags / add_tags / remove_tags / metadata / title / kind)")
 		return
 	}
 	doc, err := s.store.PatchDocument(r.Context(), docID(r), DocPatch{
 		Tags: in.Tags, AddTags: in.AddTags, RemoveTags: in.RemoveTags,
-		Metadata: in.Metadata, Title: in.Title,
+		Metadata: in.Metadata, Title: in.Title, Kind: in.Kind,
 	}, actor)
 	if err != nil {
 		writeErr(w, err)
