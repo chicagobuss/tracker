@@ -361,6 +361,7 @@ function renderItem(el, search) {
     const slugHtml = highlight(d.slug, search);
     const tagsHtml = d.tags.map(t => `<span class="badge">#${highlight(t, search)}</span>`).join("");
     const kindHtml = highlight(d.kind, search);
+    const actorHtml = d.updated_by ? `<span>by ${highlight(d.updated_by, search)}</span>` : "";
     
     let folioBadge = "";
     if (d.slug.includes("/")) {
@@ -369,7 +370,7 @@ function renderItem(el, search) {
     }
 
     el.innerHTML = `<div class="title">${titleHtml}</div>
-      <div class="meta">${folioBadge}<span class="badge">${kindHtml}</span><span>v${d.version}</span><span>${slugHtml}</span>${tagsHtml}</div>`;
+      <div class="meta">${folioBadge}<span class="badge">${kindHtml}</span><span>v${d.version}</span><span>${slugHtml}</span>${actorHtml}${tagsHtml}</div>`;
   } else if (d.type === "folio") {
     const titleHighlight = highlight(d.title, search);
     const slugHtml = highlight(d.slug, search);
@@ -544,6 +545,7 @@ async function loadList() {
         kind: d.kind,
         version: d.version,
         tags: d.tags || [],
+        updated_by: d.updated_by || d.created_by || "",
         updated_at: new Date(d.updated_at).getTime()
       };
       renderItem(el, $("#filter").value.trim());
@@ -679,12 +681,16 @@ async function openDoc(idOrSlug) {
     }
     const lock = lk ? `<span class="badge lock">🔒 ${esc(lk.owner)} until ${new Date(lk.expires_at).toLocaleTimeString()}</span>` : "";
     const hist = d.version > 1 ? `<span class="badge" id="histbtn" title="version history">⟲ history</span>` : "";
+    const actor = (d.updated_by || d.created_by) ? `<span>by <strong>${esc(d.updated_by || d.created_by)}</strong></span>` : "";
+    const tagsHtml = (d.tags && d.tags.length) ? d.tags.map(t => `<span class="badge">#${esc(t)}</span>`).join(" ") : "";
     view.innerHTML = `<div id="docmeta">
         <strong>${esc(d.title || d.slug)}</strong>
         <span class="badge">${esc(d.kind)}</span>
         <span>v${d.version}</span>
         <span>${human(d.size_bytes)}</span>
         <span>updated ${new Date(d.updated_at).toLocaleString()}</span>
+        ${actor}
+        ${tagsHtml}
         ${lock}${hist}
       </div><div id="histpanel"></div><div id="docbody">${body}</div>`;
     const hb = $("#histbtn");
