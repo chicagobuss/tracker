@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -94,6 +93,13 @@ type BlobStore interface {
 type S3BlobStore struct {
 	client *minio.Client
 	bucket string
+	// Content URLs point back at tracker rather than at the bucket. S3_ENDPOINT is
+	// the address *tracker* uses to reach S3 — usually loopback or a compose service
+	// name — and SigV4 binds it into the signature, so a presigned URL cannot be
+	// rewritten for the caller afterwards. Serving blobs through BASE_URL keeps one
+	// reachable URL scheme for both backends and leaves the bucket unexposed.
+	baseURL    string
+	signingKey []byte
 }
 
 func (s *S3BlobStore) PutObject(ctx context.Context, key string, data []byte, contentType string) error {
@@ -107,11 +113,7 @@ func (s *S3BlobStore) GetObject(ctx context.Context, key string) (io.ReadCloser,
 }
 
 func (s *S3BlobStore) PresignGetObject(ctx context.Context, key string, ttl time.Duration) (string, error) {
-	u, err := s.client.PresignedGetObject(ctx, s.bucket, key, ttl, url.Values{})
-	if err != nil {
-		return "", err
-	}
-	return u.String(), nil
+	return signedBlobURL(s.baseURL, s.signingKey, key, ttl), nil
 }
 
 type LocalBlobStore struct {
@@ -128,6 +130,15 @@ func blobSig(key []byte, blobKey string, exp int64) string {
 	return hex.EncodeToString(m.Sum(nil))
 }
 
+// signedBlobURL builds the expiring /blobs/ capability both backends hand out as
+// content_url. It is always rooted at BASE_URL, so the URL is reachable from
+// wherever tracker itself is reachable — never only from the server's own host.
+func signedBlobURL(baseURL string, signingKey []byte, blobKey string, ttl time.Duration) string {
+	exp := time.Now().Add(ttl).Unix()
+	return fmt.Sprintf("%s/blobs/%s?e=%d&s=%s",
+		strings.TrimRight(baseURL, "/"), blobKey, exp, blobSig(signingKey, blobKey, exp))
+}
+
 func (l *LocalBlobStore) PutObject(ctx context.Context, key string, data []byte, contentType string) error {
 	path := filepath.Join(l.blobDir, key)
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -141,9 +152,7 @@ func (l *LocalBlobStore) GetObject(ctx context.Context, key string) (io.ReadClos
 }
 
 func (l *LocalBlobStore) PresignGetObject(ctx context.Context, key string, ttl time.Duration) (string, error) {
-	baseURL := strings.TrimRight(l.baseURL, "/")
-	exp := time.Now().Add(ttl).Unix()
-	return fmt.Sprintf("%s/blobs/%s?e=%d&s=%s", baseURL, key, exp, blobSig(l.signingKey, key, exp)), nil
+	return signedBlobURL(l.baseURL, l.signingKey, key, ttl), nil
 }
 
 type Store struct {
@@ -199,7 +208,12 @@ func buildBlobStore(ctx context.Context, cfg Config, storageType, blobDir string
 			return nil, fmt.Errorf("create bucket %q: %w", cfg.S3Bucket, err)
 		}
 	}
-	return &S3BlobStore{client: s3Client, bucket: cfg.S3Bucket}, nil
+	return &S3BlobStore{
+		client:     s3Client,
+		bucket:     cfg.S3Bucket,
+		baseURL:    cfg.BaseURL,
+		signingKey: cfg.BlobSigningKey,
+	}, nil
 }
 
 // BlobRef is a referenced content blob: its key plus a best-effort content type

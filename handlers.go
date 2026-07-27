@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"net/http"
 	"strconv"
@@ -225,6 +226,40 @@ func (s *Server) docEnvelope(r *http.Request, doc *Document) map[string]any {
 		resp["lock"] = map[string]any{"owner": l.Owner, "expires_at": l.ExpiresAt}
 	}
 	return resp
+}
+
+// serveBlob streams a content-addressed blob out of the S3 backend. The file
+// backend is served straight off disk by a FileServer instead; this exists so
+// content_url stays rooted at BASE_URL under S3 too, where the bucket endpoint
+// is typically only reachable from tracker's own host.
+func (s *Server) serveBlob(w http.ResponseWriter, r *http.Request) {
+	key := strings.TrimPrefix(r.URL.Path, "/blobs/")
+	if key == "" {
+		http.NotFound(w, r)
+		return
+	}
+	rc, err := s.store.GetContent(r.Context(), key)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer rc.Close()
+	// minio.Object is a ReadSeeker, so ServeContent gives us range requests and
+	// content sniffing — matching what the file backend's FileServer already does.
+	if rs, ok := rc.(io.ReadSeeker); ok {
+		// minio's GetObject is lazy — a missing key surfaces on the first seek or
+		// read, not above. Probe with a seek so an unknown hash 404s here instead
+		// of 500ing from inside ServeContent.
+		if _, err := rs.Seek(0, io.SeekStart); err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		http.ServeContent(w, r, key, time.Time{}, rs)
+		return
+	}
+	if _, err := io.Copy(w, rc); err != nil {
+		log.Printf("serve blob %s: %v", key, err)
+	}
 }
 
 // --- documents ---
