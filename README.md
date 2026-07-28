@@ -202,6 +202,45 @@ endpoint exists to prevent. It's in git history if you need it.
   tracker is and the bucket stays private.
 - **Task queue.** `tasks` with `FOR UPDATE SKIP LOCKED` claiming — no two agents
   grab the same task.
+- **Workspaces enforced by the database.** Separation is a Postgres row-level
+  security policy, not a `where` clause this codebase has to remember. A request
+  runs with `app.workspace` set and every table is filtered to it, so a query
+  that forgets its predicate returns nothing rather than another workspace's
+  rows.
+
+## Workspaces
+
+A workspace is a hard partition of the store. Documents, tasks and actors in one
+are invisible from another — separate search results, separate slug namespaces,
+separate `list_tags` vocabularies. Point a throwaway experiment at its own
+workspace and it cannot pollute an agent's context with unrelated work.
+
+```bash
+curl -X POST localhost:8770/workspaces -H 'X-Actor: me' \
+  -H 'Content-Type: application/json' -d '{"name":"greenfield-idea"}'
+
+claude mcp add --transport http --scope user tracker-gf http://127.0.0.1:8770/mcp \
+  --header "X-Actor: claude-code-$(hostname -s)" \
+  --header "X-Workspace: greenfield-idea"
+```
+
+Names match `[a-z0-9][a-z0-9_-]{0,62}`. Creating one is free — a row in a
+registry table, no DDL — so spinning up a dozen costs nothing. An unknown name
+is a `404` rather than an implicit create, so a typo'd `X-Workspace` reports
+itself instead of silently presenting an empty store.
+
+Everything that predates workspaces lives in `default`, and a request that names
+none resolves there, so existing agents keep working untouched.
+
+**`X-Workspace` is a preference; a confined token is a boundary.** The header is
+caller-supplied, so on its own it separates work without securing it — fine for
+avoiding context pollution between your own agents. To make it enforceable, bind
+the token: `API_TOKENS=<tok-a>:personal,<tok-b>:greenfield-idea`. A confined
+token pins its workspace and ignores the header entirely.
+
+One caveat: `/blobs/<sha256>` is not workspace-scoped. Content is addressed by
+hash, so fetching one means already knowing its content, but revision listings do
+hand out hashes — so keep `API_TOKENS` set if that matters to you.
 
 ## Going multi-machine
 

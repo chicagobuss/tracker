@@ -189,6 +189,7 @@ var mcpToolOrder = []string{
 	"list_folios", "create_folio", "get_folio", "get_folio_file", "add_folio_file",
 	"list_tasks", "get_task", "enqueue_task", "claim_task", "complete_task",
 	"list_actors", "actor_activity",
+	"list_workspaces", "create_workspace",
 }
 
 func mcpToolDescriptors() []map[string]any {
@@ -476,6 +477,29 @@ var mcpTools = map[string]mcpTool{
 				return nil, err
 			}
 			return map[string]any{"tags": tags, "count": len(tags)}, nil
+		},
+	},
+	"list_workspaces": {
+		desc:   "List workspaces. A workspace is a hard partition of the store: docs, tasks and actors in one are invisible from another, so unrelated work never pollutes your search results. Which one you are in is fixed by this connection (its token or X-Workspace header), not chosen per call.",
+		schema: obj(nil, nil),
+		fn: func(ctx context.Context, s *Server, _ string, _ targs) (any, error) {
+			all, err := s.store.ListWorkspaces(ctx)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"workspaces": all, "count": len(all)}, nil
+		},
+	},
+	"create_workspace": {
+		desc:     "Register a new workspace. Creating one does not switch you into it — point a connection at it with X-Workspace (or a token bound to it) to work there. Names match [a-z0-9][a-z0-9_-]{0,62}.",
+		mutating: true,
+		schema:   obj([]string{"name"}, map[string]any{"name": pStr, "description": pStr}),
+		fn: func(ctx context.Context, s *Server, actor string, a targs) (any, error) {
+			ws, err := s.store.CreateWorkspace(ctx, a.str("name"), a.str("description"), actor)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"workspace": ws}, nil
 		},
 	},
 	"list_folios": {

@@ -327,3 +327,115 @@ func TestWriteContent_BlobDedupe(t *testing.T) {
 		t.Errorf("content keys differ (%q vs %q); identical bytes must dedupe to one blob", wa.ContentKey, wb.ContentKey)
 	}
 }
+
+// validWorkspace is a security boundary, not cosmetics: it is the only thing
+// standing between a caller-supplied X-Workspace and set_config, so the
+// AllWorkspaces sentinel — which lifts RLS entirely — must be unreachable
+// through it. Needs no database.
+func TestValidWorkspace(t *testing.T) {
+	valid := []string{"default", "alpha", "greenfield-1", "a", "a_b-c", "x0123456789"}
+	for _, name := range valid {
+		if !validWorkspace(name) {
+			t.Errorf("validWorkspace(%q) = false, want true", name)
+		}
+	}
+	invalid := []string{
+		AllWorkspaces, "", "Alpha", "-leading", "_leading", "has space",
+		"has.dot", "a'; drop table documents; --", "ünicode",
+		"tooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooong",
+	}
+	for _, name := range invalid {
+		if validWorkspace(name) {
+			t.Errorf("validWorkspace(%q) = true, want false", name)
+		}
+	}
+}
+
+// The isolation guarantee itself. These calls go through the ordinary Store
+// methods, none of which filter by workspace in their SQL — if this passes, the
+// RLS policies are what is doing the work.
+func TestWorkspaceIsolation(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// testStore truncates documents but deliberately not workspaces, so on a
+	// re-run this workspace is already registered.
+	if _, err := s.CreateWorkspace(ctx, "alpha", "greenfield", "tester"); err != nil &&
+		!errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("create workspace: %v", err)
+	}
+
+	defCtx, defRelease, err := s.Scoped(ctx, "default")
+	if err != nil {
+		t.Fatalf("scope default: %v", err)
+	}
+	defer defRelease()
+	altCtx, altRelease, err := s.Scoped(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("scope alpha: %v", err)
+	}
+	defer altRelease()
+
+	if _, err := s.CreateDocument(defCtx, "shared", "In default", "note", nil, nil, nil, "text/markdown", "tester"); err != nil {
+		t.Fatalf("create in default: %v", err)
+	}
+	// The same slug must be free in another workspace — globally-unique slugs
+	// would make throwaway experiments collide with real work.
+	if _, err := s.CreateDocument(altCtx, "shared", "In alpha", "note", nil, nil, nil, "text/markdown", "tester"); err != nil {
+		t.Fatalf("same slug in another workspace: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name, wantTitle string
+		ctx             context.Context
+	}{
+		{"default", "In default", defCtx},
+		{"alpha", "In alpha", altCtx},
+	} {
+		docs, total, err := s.ListDocuments(tc.ctx, "", "", "", "", "exclude", 50, 0)
+		if err != nil {
+			t.Fatalf("list in %s: %v", tc.name, err)
+		}
+		if total != 1 {
+			t.Errorf("%s sees %d documents, want only its own 1", tc.name, total)
+		}
+		if len(docs) == 1 && docs[0].Title != tc.wantTitle {
+			t.Errorf("%s resolved slug 'shared' to %q, want %q", tc.name, docs[0].Title, tc.wantTitle)
+		}
+		// Full-text search must be scoped too — it is the whole reason for this.
+		if _, hits, err := s.ListDocuments(tc.ctx, "default alpha", "", "", "", "exclude", 50, 0); err != nil {
+			t.Fatalf("search in %s: %v", tc.name, err)
+		} else if hits > 1 {
+			t.Errorf("search in %s returned %d hits, want at most its own 1", tc.name, hits)
+		}
+	}
+
+	// A document created in one workspace must not be reachable by id from the
+	// other, even though the caller knows the id.
+	alphaDoc, err := s.GetDocument(altCtx, "shared")
+	if err != nil {
+		t.Fatalf("get in alpha: %v", err)
+	}
+	if _, err := s.GetDocument(defCtx, alphaDoc.ID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("default fetched alpha's document by id: err = %v, want ErrNotFound", err)
+	}
+
+	// Tasks partition on the same boundary.
+	if _, err := s.CreateTask(altCtx, "alpha work", nil, "tester"); err != nil {
+		t.Fatalf("create task in alpha: %v", err)
+	}
+	if tasks, total, err := s.ListTasks(defCtx, "", 50, 0); err != nil {
+		t.Fatalf("list tasks in default: %v", err)
+	} else if len(tasks) != 0 || total != 0 {
+		t.Errorf("default sees %d of alpha's tasks (total %d), want 0", len(tasks), total)
+	}
+}
+
+// An unregistered workspace must be reported, not silently treated as a new
+// empty one — otherwise a typo'd X-Workspace looks like a wiped store.
+func TestScopedRejectsUnknownWorkspace(t *testing.T) {
+	s := testStore(t)
+	if _, _, err := s.Scoped(context.Background(), "no-such-workspace"); !errors.Is(err, ErrNoWorkspace) {
+		t.Fatalf("err = %v, want ErrNoWorkspace", err)
+	}
+}

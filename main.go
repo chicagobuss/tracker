@@ -23,7 +23,11 @@ var webFS embed.FS
 func bearerOK(cfg Config, r *http.Request) bool {
 	const p = "Bearer "
 	tok := r.Header.Get("Authorization")
-	return len(tok) > len(p) && tok[:len(p)] == p && cfg.APITokens[tok[len(p):]]
+	if len(tok) <= len(p) || tok[:len(p)] != p {
+		return false
+	}
+	_, ok := cfg.APITokens[tok[len(p):]]
+	return ok
 }
 
 // blobSigOK verifies the e=<unix-expiry>&s=<hmac> pair minted by PresignGetObject.
@@ -117,6 +121,9 @@ Usage:
 	mux.HandleFunc("POST /tasks/claim", srv.auth(srv.claimTask))
 	mux.HandleFunc("POST /tasks/{id}/claim", srv.auth(srv.claimTaskByID))
 	mux.HandleFunc("POST /tasks/{id}/complete", srv.auth(srv.completeTask))
+
+	mux.HandleFunc("GET /workspaces", srv.auth(srv.listWorkspaces))
+	mux.HandleFunc("POST /workspaces", srv.auth(srv.createWorkspace))
 
 	mux.HandleFunc("GET /actors", srv.auth(srv.listActors))
 	mux.HandleFunc("GET /actors/{name}/activity", srv.auth(srv.actorActivity))

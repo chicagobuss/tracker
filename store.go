@@ -14,6 +14,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -41,6 +42,8 @@ var (
 	ErrDeleted         = errors.New("document is soft-deleted; restore it first")
 	ErrConfirmMismatch = errors.New("hard-delete confirm must exactly equal the document slug")
 	ErrFolioNotEmpty   = errors.New("folio still has files; pass cascade=true or delete files first")
+	ErrNoWorkspace     = errors.New("unknown workspace; create it with create_workspace first")
+	ErrBadWorkspace    = errors.New("workspace must match [a-z0-9][a-z0-9_-]{0,62}")
 )
 
 // normalizeCreateError turns Postgres's unique-index error into a stable
@@ -160,6 +163,143 @@ type Store struct {
 	blobs BlobStore
 }
 
+// AllWorkspaces lifts workspace scoping for maintenance paths that must see the
+// whole store — migrate-blobs has to enumerate every blob, not one workspace's.
+// It can never arrive from a request: validWorkspace rejects it, and that is the
+// only route by which a caller-supplied name reaches Scoped.
+const AllWorkspaces = "*"
+
+// Workspace names are constrained so they are safe to display, embed in a slug
+// path, and compare exactly — and so the AllWorkspaces sentinel stays
+// unreachable from user input.
+var wsNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}$`)
+
+func validWorkspace(name string) bool { return wsNameRe.MatchString(name) }
+
+// querier is the slice of pgx shared by *pgxpool.Pool and *pgxpool.Conn, so a
+// Store method can run against either without caring which it got.
+type querier interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	Begin(context.Context) (pgx.Tx, error)
+}
+
+type wsConnKey struct{}
+
+// q returns the workspace-pinned connection installed by Scoped, falling back to
+// the bare pool. The fallback is only right for statements RLS does not govern
+// (migrations, Ping). Everything else goes through Scoped — and a path that
+// forgets to gets a connection with app.workspace unset, which the policies read
+// as "no rows" rather than "every row". Forgetting fails closed.
+func (s *Store) q(ctx context.Context) querier {
+	if c, ok := ctx.Value(wsConnKey{}).(*pgxpool.Conn); ok {
+		return c
+	}
+	return s.db
+}
+
+// Scoped pins one pooled connection to a workspace for the life of a request and
+// returns it inside a derived context, along with the func that releases it.
+//
+// The setting is session-scoped rather than transaction-scoped (set_config's
+// third argument is false) because Store methods issue both bare queries and
+// their own transactions; pinning the connection covers both without every
+// method having to open a transaction it does not otherwise need.
+func (s *Store) Scoped(ctx context.Context, workspace string) (context.Context, func(), error) {
+	noop := func() {}
+	c, err := s.db.Acquire(ctx)
+	if err != nil {
+		return ctx, noop, err
+	}
+	release := func() {
+		// Restore the connection before it returns to the pool. Every request sets
+		// both of these on acquire, so a leftover could not actually be observed —
+		// this is belt and braces for a future path that forgets. WithoutCancel so
+		// the reset still runs when the client hung up mid-request.
+		_, _ = c.Exec(context.WithoutCancel(ctx),
+			`reset role; select set_config('app.workspace', '', false)`)
+		c.Release()
+	}
+	// Drop to the unprivileged role before touching any data. Without this the
+	// policies are inert: tracker normally connects as the database superuser
+	// created by the postgres image, and a superuser bypasses RLS no matter what
+	// ENABLE/FORCE say. Migrations still run as the real user, on the bare pool.
+	if _, err := c.Exec(ctx, `set role tracker_agent`); err != nil {
+		release()
+		return ctx, noop, fmt.Errorf("assume tracker_agent: %w", err)
+	}
+	// One round trip: install the setting and confirm the workspace exists. An
+	// unknown name would otherwise read as an empty workspace and only fail later,
+	// on a foreign-key violation from the first write.
+	var known bool
+	var ignored string
+	err = c.QueryRow(ctx,
+		`select set_config('app.workspace', $1, false), exists(select 1 from workspaces where name = $1)`,
+		workspace).Scan(&ignored, &known)
+	if err != nil {
+		release()
+		return ctx, noop, err
+	}
+	if !known && workspace != AllWorkspaces {
+		release()
+		return ctx, noop, ErrNoWorkspace
+	}
+	return context.WithValue(ctx, wsConnKey{}, c), release, nil
+}
+
+// Workspace is the registry row describing one partition of the store.
+type Workspace struct {
+	Name        string    `json:"name"`
+	Description string    `json:"description"`
+	CreatedBy   string    `json:"created_by,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+// CreateWorkspace registers a workspace. Creation is deliberately explicit: with
+// auto-create, a typo'd X-Workspace would silently open an empty world instead of
+// reporting that the name is unknown.
+func (s *Store) CreateWorkspace(ctx context.Context, name, description, by string) (*Workspace, error) {
+	if !validWorkspace(name) {
+		return nil, ErrBadWorkspace
+	}
+	// Registry writes are not workspace-scoped, so they run on the pool: a caller
+	// in workspace A must be able to create workspace B.
+	var ws Workspace
+	err := s.db.QueryRow(ctx, `
+		insert into workspaces (name, description, created_by) values ($1, $2, $3)
+		on conflict (name) do nothing
+		returning name, description, coalesce(created_by,''), created_at`,
+		name, description, by).Scan(&ws.Name, &ws.Description, &ws.CreatedBy, &ws.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrAlreadyExists
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &ws, nil
+}
+
+// ListWorkspaces returns the registry. Not workspace-scoped by design — this is
+// how an agent discovers where it is allowed to work.
+func (s *Store) ListWorkspaces(ctx context.Context) ([]Workspace, error) {
+	rows, err := s.db.Query(ctx,
+		`select name, description, coalesce(created_by,''), created_at from workspaces order by name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Workspace{}
+	for rows.Next() {
+		var w Workspace
+		if err := rows.Scan(&w.Name, &w.Description, &w.CreatedBy, &w.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, w)
+	}
+	return out, rows.Err()
+}
+
 func openStore(ctx context.Context, cfg Config) (*Store, error) {
 	db, err := pgxpool.New(ctx, cfg.DatabaseURL)
 	if err != nil {
@@ -226,7 +366,7 @@ type BlobRef struct {
 // AllBlobRefs lists every distinct blob key referenced by a live document or any
 // revision — the authoritative set to migrate (and naturally excludes orphans).
 func (s *Store) AllBlobRefs(ctx context.Context) ([]BlobRef, error) {
-	rows, err := s.db.Query(ctx, `
+	rows, err := s.q(ctx).Query(ctx, `
 		select distinct on (t.content_key)
 			t.content_key, coalesce(d.content_type, 'application/octet-stream')
 		from (
@@ -262,6 +402,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		// DDL, and RLS does not govern it — this must run on the bare pool.
 		if _, err := s.db.Exec(ctx, string(sql)); err != nil {
 			return fmt.Errorf("apply %s: %w", f, err)
 		}
@@ -307,9 +448,9 @@ func (s *Store) CreateDocument(ctx context.Context, slug, title, kind string, ta
 	}
 
 	if content == nil {
-		row := s.db.QueryRow(ctx, `
-			insert into documents (slug, title, kind, tags, metadata, created_by, updated_by, fts)
-			values ($1, $2, $3, $4, $5::jsonb, $6, $6, to_tsvector('english', $2))
+		row := s.q(ctx).QueryRow(ctx, `
+			insert into documents (workspace, slug, title, kind, tags, metadata, created_by, updated_by, fts)
+			values (current_setting('app.workspace'), $1, $2, $3, $4, $5::jsonb, $6, $6, to_tsvector('english', $2))
 			returning `+docSelect, slug, title, kind, tags, string(metadata), by)
 		doc, err := scanDoc(row)
 		if err == nil {
@@ -326,17 +467,17 @@ func (s *Store) CreateDocument(ctx context.Context, slug, title, kind string, ta
 		return nil, fmt.Errorf("put blob: %w", err)
 	}
 
-	tx, err := s.db.Begin(ctx)
+	tx, err := s.q(ctx).Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
 
 	row := tx.QueryRow(ctx, `
-		insert into documents (slug, title, kind, tags, metadata, content_key, content_hash,
+		insert into documents (workspace, slug, title, kind, tags, metadata, content_key, content_hash,
 			content_type, size_bytes, version, created_by, updated_by,
 			fts)
-		values ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, 1, $10, $10,
+		values (current_setting('app.workspace'), $1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, 1, $10, $10,
 			to_tsvector('english', $2 || ' ' || left($11, 100000)))
 		returning `+docSelect, slug, title, kind, tags, string(metadata), key, hash,
 		contentType, int64(len(content)), by, string(content))
@@ -360,7 +501,7 @@ func (s *Store) CreateDocument(ctx context.Context, slug, title, kind string, ta
 const idClause = `(id::text = $1 or slug = $1)`
 
 func (s *Store) GetDocument(ctx context.Context, idOrSlug string) (*Document, error) {
-	return scanDoc(s.db.QueryRow(ctx, `select `+docSelect+` from documents where `+idClause, idOrSlug))
+	return scanDoc(s.q(ctx).QueryRow(ctx, `select `+docSelect+` from documents where `+idClause, idOrSlug))
 }
 
 // ListDocuments returns a page of documents matching the filters plus the total
@@ -402,7 +543,7 @@ func (s *Store) ListDocuments(ctx context.Context, q, kind, tag, mode, deleted s
 		  and ($3 = '' or $3 = any(tags)) ` + delFilter
 
 	var total int
-	if err := s.db.QueryRow(ctx, `select count(*) from documents `+filter, q, kind, tag).Scan(&total); err != nil {
+	if err := s.q(ctx).QueryRow(ctx, `select count(*) from documents `+filter, q, kind, tag).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 
@@ -411,7 +552,7 @@ func (s *Store) ListDocuments(ctx context.Context, q, kind, tag, mode, deleted s
 	if q != "" {
 		order = `order by ts_rank(fts, ` + tsq + `) * exp(-extract(epoch from (now() - updated_at)) / 2592000.0) desc, updated_at desc`
 	}
-	rows, err := s.db.Query(ctx, `select `+docSelect+` from documents `+filter+` `+order+`
+	rows, err := s.q(ctx).Query(ctx, `select `+docSelect+` from documents `+filter+` `+order+`
 		limit $4 offset $5`, q, kind, tag, limit, offset)
 	if err != nil {
 		return nil, 0, err
@@ -446,7 +587,7 @@ type DocPatch struct {
 // a changed title reindexes on the next content write.) Requires only an actor
 // for attribution.
 func (s *Store) PatchDocument(ctx context.Context, idOrSlug string, p DocPatch, by string) (*Document, error) {
-	tx, err := s.db.Begin(ctx)
+	tx, err := s.q(ctx).Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -561,7 +702,7 @@ type TagCount struct {
 // ListTags enumerates the whole tag vocabulary with usage counts, so an agent
 // can discover what tags exist without pulling every document.
 func (s *Store) ListTags(ctx context.Context) ([]TagCount, error) {
-	rows, err := s.db.Query(ctx, `
+	rows, err := s.q(ctx).Query(ctx, `
 		select t, count(*) from documents, unnest(tags) as t
 		where deleted_at is null
 		group by t order by count(*) desc, t`)
@@ -585,7 +726,7 @@ func (s *Store) ListTags(ctx context.Context) ([]TagCount, error) {
 // Returns ErrLeaseHeld (with the current holder) if a different agent holds a
 // live lease.
 func (s *Store) AcquireLease(ctx context.Context, docID, owner, reason string, ttl time.Duration, leaseToken string) (*Lease, error) {
-	tx, err := s.db.Begin(ctx)
+	tx, err := s.q(ctx).Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -662,7 +803,7 @@ func (s *Store) AcquireLease(ctx context.Context, docID, owner, reason string, t
 // GetLease returns the current lease for a doc and whether it is still live.
 func (s *Store) GetLease(ctx context.Context, docID string) (*Lease, bool, error) {
 	var l Lease
-	err := s.db.QueryRow(ctx, `
+	err := s.q(ctx).QueryRow(ctx, `
 		select dl.document_id, dl.owner, coalesce(dl.reason,''), dl.acquired_at, dl.renewed_at, dl.expires_at
 		from doc_locks dl join documents d on d.id = dl.document_id
 		where `+idClause+`
@@ -678,7 +819,7 @@ func (s *Store) GetLease(ctx context.Context, docID string) (*Lease, bool, error
 
 // ReleaseLease drops the lease iff the caller presents the matching token.
 func (s *Store) ReleaseLease(ctx context.Context, docID, leaseToken string) error {
-	ct, err := s.db.Exec(ctx, `
+	ct, err := s.q(ctx).Exec(ctx, `
 		delete from doc_locks
 		where document_id = (select id from documents where `+idClause+`)
 		  and lease_token::text = $2`, docID, leaseToken)
@@ -706,7 +847,7 @@ func (s *Store) WriteContent(ctx context.Context, docID, owner, leaseToken strin
 		return nil, fmt.Errorf("put blob: %w", err)
 	}
 
-	tx, err := s.db.Begin(ctx)
+	tx, err := s.q(ctx).Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -769,7 +910,7 @@ func (s *Store) WriteContent(ctx context.Context, docID, owner, leaseToken strin
 // find it. Folios with live files refuse unless cascade=true (which soft-deletes
 // those files too). Idempotent if already soft-deleted.
 func (s *Store) SoftDeleteDocument(ctx context.Context, idOrSlug, by string, cascade bool) (*Document, error) {
-	tx, err := s.db.Begin(ctx)
+	tx, err := s.q(ctx).Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -829,7 +970,7 @@ func (s *Store) SoftDeleteDocument(ctx context.Context, idOrSlug, by string, cas
 
 // RestoreDocument clears a soft-delete tombstone. No-op if the doc is live.
 func (s *Store) RestoreDocument(ctx context.Context, idOrSlug, by string) (*Document, error) {
-	row := s.db.QueryRow(ctx, `
+	row := s.q(ctx).QueryRow(ctx, `
 		update documents set deleted_at = null, deleted_by = null, updated_by = $2, updated_at = now()
 		where `+idClause+`
 		returning `+docSelect, idOrSlug, by)
@@ -847,7 +988,7 @@ func (s *Store) RestoreDocument(ctx context.Context, idOrSlug, by string) (*Docu
 // deletes. Folios with any remaining files (including soft-deleted) refuse
 // unless cascade=true.
 func (s *Store) HardDeleteDocument(ctx context.Context, idOrSlug, confirm, by string, cascade bool) (*Document, error) {
-	tx, err := s.db.Begin(ctx)
+	tx, err := s.q(ctx).Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -926,7 +1067,7 @@ type Revision struct {
 
 // DocRevisions lists a document's versions newest-first.
 func (s *Store) DocRevisions(ctx context.Context, idOrSlug string) ([]Revision, error) {
-	rows, err := s.db.Query(ctx, `
+	rows, err := s.q(ctx).Query(ctx, `
 		select r.version, r.content_hash, r.size_bytes, coalesce(r.author,''), r.created_at
 		from document_revisions r join documents d on d.id = r.document_id
 		where (d.id::text = $1 or d.slug = $1)
@@ -949,7 +1090,7 @@ func (s *Store) DocRevisions(ctx context.Context, idOrSlug string) ([]Revision, 
 // RevisionContent returns the blob key + content type for a specific past version,
 // so its bytes can be streamed from the retained content-addressed store.
 func (s *Store) RevisionContent(ctx context.Context, idOrSlug string, version int) (key, contentType string, err error) {
-	err = s.db.QueryRow(ctx, `
+	err = s.q(ctx).QueryRow(ctx, `
 		select r.content_key, d.content_type
 		from document_revisions r join documents d on d.id = r.document_id
 		where (d.id::text = $1 or d.slug = $1) and r.version = $2`, idOrSlug, version).Scan(&key, &contentType)
@@ -974,13 +1115,13 @@ func (s *Store) touchActor(ctx context.Context, name string) {
 	if name == "" {
 		return
 	}
-	_, _ = s.db.Exec(ctx, `
-		insert into actors (name, action_count) values ($1, 1)
-		on conflict (name) do update set last_seen = now(), action_count = actors.action_count + 1`, name)
+	_, _ = s.q(ctx).Exec(ctx, `
+		insert into actors (workspace, name, action_count) values (current_setting('app.workspace'), $1, 1)
+		on conflict (workspace, name) do update set last_seen = now(), action_count = actors.action_count + 1`, name)
 }
 
 func (s *Store) ListActors(ctx context.Context) ([]Actor, error) {
-	rows, err := s.db.Query(ctx, `select name, first_seen, last_seen, action_count from actors order by last_seen desc`)
+	rows, err := s.q(ctx).Query(ctx, `select name, first_seen, last_seen, action_count from actors order by last_seen desc`)
 	if err != nil {
 		return nil, err
 	}
@@ -1009,7 +1150,7 @@ type ActivityItem struct {
 // ActorActivity returns an entity's most recent document writes — the real
 // "last changes by entity", read straight from the immutable revision log.
 func (s *Store) ActorActivity(ctx context.Context, name string, limit int) ([]ActivityItem, error) {
-	rows, err := s.db.Query(ctx, `
+	rows, err := s.q(ctx).Query(ctx, `
 		select r.document_id, d.slug, d.title, r.version, r.size_bytes, r.created_at
 		from document_revisions r join documents d on d.id = r.document_id
 		where r.author = $1 order by r.created_at desc limit $2`, name, limit)

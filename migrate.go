@@ -83,6 +83,15 @@ Flags:
 		log.Fatalf("destination backend (%s): %v", dst, err)
 	}
 
+	// Blob migration spans the whole store, so it runs unscoped. Without this the
+	// RLS policies would see no app.workspace, match nothing, and the migration
+	// would report "0 blobs" and exit successfully — silently copying nothing.
+	ctx, release, err := store.Scoped(ctx, AllWorkspaces)
+	if err != nil {
+		log.Fatalf("scope connection: %v", err)
+	}
+	defer release()
+
 	refs, err := store.AllBlobRefs(ctx)
 	if err != nil {
 		log.Fatalf("enumerate blobs: %v", err)
