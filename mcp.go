@@ -205,6 +205,12 @@ type mcpTool struct {
 }
 
 func obj(required []string, props map[string]any) map[string]any {
+	// A nil map marshals to JSON null, and a null "properties" makes strict MCP
+	// clients reject the whole tools/list. Argument-less tools must still
+	// advertise an empty object.
+	if props == nil {
+		props = map[string]any{}
+	}
 	sch := map[string]any{"type": "object", "properties": props}
 	if len(required) > 0 {
 		sch["required"] = required
