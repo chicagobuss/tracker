@@ -85,3 +85,43 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # Cut the GitHub Release from the tag itself, so `git push origin vX.Y.Z` is the
+  # whole ritual. Runs after `image`, so a release never points at a version that
+  # failed to publish.
+  release:
+    needs: image
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # job-level, and it replaces the read-only default above
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # tag objects, so the annotation below is readable
+      - name: create release from the tag annotation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+
+          # Re-running a workflow must not fail on an existing release.
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release $tag already exists; nothing to do"
+            exit 0
+          fi
+
+          # An annotated tag carries the notes: first line is the title, the rest
+          # is the body. Test the object type rather than the string — for a
+          # lightweight tag %(contents:subject) silently yields the *commit*
+          # subject, so an emptiness check would title the release with whatever
+          # the last commit happened to say (v1.3.0 is such a tag).
+          if [ "$(git cat-file -t "$tag")" != "tag" ]; then
+            echo "lightweight tag; generating notes from merged PRs instead"
+            gh release create "$tag" --title "$tag" --generate-notes
+          else
+            subject="$(git tag -l --format='%(contents:subject)' "$tag")"
+            body="$(git tag -l --format='%(contents:body)' "$tag")"
+            printf '%s' "$body" | gh release create "$tag" --title "$subject" --notes-file -
+          fi
