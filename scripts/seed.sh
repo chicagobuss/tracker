@@ -28,7 +28,7 @@ AUTH=()
 post() {
   local path="$1" body="$2" out code
   out="$(curl -sS -X POST "$BASE_URL$path" \
-    -H "X-Actor: $ACTOR" -H 'Content-Type: application/json' "${AUTH[@]}" \
+    -H "X-Actor: $ACTOR" -H 'Content-Type: application/json' ${AUTH[@]+"${AUTH[@]}"} \
     -d "$body" -w $'\n%{http_code}')"
   code="${out##*$'\n'}"
   case "$code" in
