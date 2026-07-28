@@ -197,7 +197,9 @@ endpoint exists to prevent. It's in git history if you need it.
   stale or lease-less write can't clobber.
 - **Content-addressed blobs.** Bytes are stored under `sha256/<hash>`
   (immutable, deduped) in either a local directory (`STORAGE_TYPE=file`) or an S3
-  bucket (`STORAGE_TYPE=s3`). Agents fetch them via a presigned or signed local URL.
+  bucket (`STORAGE_TYPE=s3`). Either way agents fetch them from an expiring
+  `BASE_URL/blobs/...` link, so a `content_url` is reachable from wherever
+  tracker is and the bucket stays private.
 - **Task queue.** `tasks` with `FOR UPDATE SKIP LOCKED` claiming — no two agents
   grab the same task.
 

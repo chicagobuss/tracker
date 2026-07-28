@@ -3,10 +3,43 @@ package main
 import (
 	"context"
 	"errors"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+// Every backend must hand out a content_url rooted at BASE_URL. S3_ENDPOINT is
+// tracker's own route to the bucket — typically loopback or a compose service
+// name — and SigV4 binds the host into the signature, so presigning against it
+// produced URLs that no other machine could fetch. Needs no database: the S3
+// backend's client is never touched on this path, which is the point.
+func TestPresignGetObject_RootedAtBaseURL(t *testing.T) {
+	const baseURL = "http://10.0.0.5:8770"
+	const blobKey = "sha256/deadbeef"
+	key := []byte("0123456789abcdef0123456789abcdef")
+
+	backends := map[string]BlobStore{
+		"file": &LocalBlobStore{blobDir: t.TempDir(), baseURL: baseURL, signingKey: key},
+		"s3":   &S3BlobStore{bucket: "blobs", baseURL: baseURL, signingKey: key},
+	}
+	for name, bs := range backends {
+		t.Run(name, func(t *testing.T) {
+			got, err := bs.PresignGetObject(context.Background(), blobKey, 15*time.Minute)
+			if err != nil {
+				t.Fatalf("presign: %v", err)
+			}
+			if want := baseURL + "/blobs/" + blobKey + "?"; !strings.HasPrefix(got, want) {
+				t.Fatalf("content_url = %q, want prefix %q", got, want)
+			}
+			// And the signature has to verify, or the URL 401s once auth is on.
+			if !blobSigOK(Config{BlobSigningKey: key}, httptest.NewRequest("GET", got, nil)) {
+				t.Errorf("signature on %q did not verify", got)
+			}
+		})
+	}
+}
 
 func TestAcquireLease_FreshDoc(t *testing.T) {
 	s := testStore(t)

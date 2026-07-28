@@ -128,23 +128,28 @@ Usage:
 	mux.HandleFunc("GET /folios/{slug}/files/{filename}", srv.auth(srv.getFolioFile))
 	mux.HandleFunc("GET /folios/{slug}/files/{filename}/raw", srv.auth(srv.rawFolioFile))
 
-	if cfg.StorageType == "file" {
-		blobHandler := http.StripPrefix("/blobs/", http.FileServer(http.Dir(cfg.BlobDir)))
-		mux.HandleFunc("GET /blobs/", func(w http.ResponseWriter, r *http.Request) {
-			if strings.HasSuffix(r.URL.Path, "/") {
-				http.NotFound(w, r)
-				return
-			}
-			// When auth is enabled, a blob URL must carry a live HMAC signature
-			// (the expiring content_url) or the caller a valid bearer token —
-			// otherwise every doc would be world-readable by hash forever.
-			if len(cfg.APITokens) > 0 && !bearerOK(cfg, r) && !blobSigOK(cfg, r) {
-				http.Error(w, `{"error":{"code":"unauthorized","message":"expired or missing blob signature"}}`, http.StatusUnauthorized)
-				return
-			}
-			blobHandler.ServeHTTP(w, r)
-		})
-	}
+	// Both backends serve content_url from here. PresignGetObject always mints
+	// {BASE_URL}/blobs/..., so an agent never receives a URL that only resolves on
+	// tracker's own host; with S3 the bytes are streamed through from the bucket.
+	fileBlobs := http.StripPrefix("/blobs/", http.FileServer(http.Dir(cfg.BlobDir)))
+	mux.HandleFunc("GET /blobs/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/") {
+			http.NotFound(w, r)
+			return
+		}
+		// When auth is enabled, a blob URL must carry a live HMAC signature
+		// (the expiring content_url) or the caller a valid bearer token —
+		// otherwise every doc would be world-readable by hash forever.
+		if len(cfg.APITokens) > 0 && !bearerOK(cfg, r) && !blobSigOK(cfg, r) {
+			http.Error(w, `{"error":{"code":"unauthorized","message":"expired or missing blob signature"}}`, http.StatusUnauthorized)
+			return
+		}
+		if cfg.StorageType == "file" {
+			fileBlobs.ServeHTTP(w, r)
+			return
+		}
+		srv.serveBlob(w, r)
+	})
 
 	// Web UI (unauthenticated static assets; data fetches carry the bearer token).
 	webRoot, _ := fs.Sub(webFS, "web")
