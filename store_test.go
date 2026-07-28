@@ -439,3 +439,76 @@ func TestScopedRejectsUnknownWorkspace(t *testing.T) {
 		t.Fatalf("err = %v, want ErrNoWorkspace", err)
 	}
 }
+
+// The per-call workspace override is a convenience for reading across
+// workspaces from one session, so its refusals are the interesting part: it
+// must not become a way around a confined token or a way to misfile a write.
+func TestScopeOverride(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if _, err := s.CreateWorkspace(ctx, "alpha", "greenfield", "tester"); err != nil &&
+		!errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("create workspace: %v", err)
+	}
+	srv := &Server{store: s, cfg: Config{DefaultWorkspace: "default"}}
+
+	// A request pinned to "default" by an unconfined token.
+	free := context.WithValue(ctx, reqWSKey{}, reqWS{name: "default"})
+	confined := context.WithValue(ctx, reqWSKey{}, reqWS{name: "alpha", confined: true})
+
+	read := mcpTools["list_docs"]
+	write := mcpTools["create_doc"]
+
+	t.Run("allowed for a read on an unconfined token", func(t *testing.T) {
+		scoped, release, err := srv.scopeOverride(free, read, "alpha")
+		if err != nil {
+			t.Fatalf("override: %v", err)
+		}
+		defer release()
+		if _, total, err := s.ListDocuments(scoped, "", "", "", "", "exclude", 50, 0); err != nil {
+			t.Fatalf("list: %v", err)
+		} else if total != 0 {
+			// testStore truncated documents, so alpha is empty — the point is
+			// that the call succeeded against alpha rather than being refused.
+			t.Logf("alpha holds %d documents", total)
+		}
+	})
+
+	for _, tc := range []struct {
+		name, ws, wantSubstr string
+		ctx                  context.Context
+		tool                 mcpTool
+	}{
+		{"confined token cannot escape", "default", "confined to workspace", confined, read},
+		{"writes are never redirected", "alpha", "read-only override", free, write},
+		{"sentinel is unreachable", AllWorkspaces, "invalid", free, read},
+		{"invalid name refused", "Alpha", "invalid", free, read},
+		{"unknown workspace refused", "no-such-ws", "unknown workspace", free, read},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, release, err := srv.scopeOverride(tc.ctx, tc.tool, tc.ws)
+			if err == nil {
+				release()
+				t.Fatalf("override to %q was allowed; want refusal", tc.ws)
+			}
+			if !strings.Contains(err.Error(), tc.wantSubstr) {
+				t.Errorf("err = %q, want it to mention %q", err, tc.wantSubstr)
+			}
+		})
+	}
+}
+
+// Every read tool should advertise the override, and no write tool should.
+func TestWorkspaceArgOnReadToolsOnly(t *testing.T) {
+	for _, d := range mcpToolDescriptors() {
+		name := d["name"].(string)
+		schema := d["inputSchema"].(map[string]any)
+		props, _ := schema["properties"].(map[string]any)
+		_, has := props["workspace"]
+
+		want := !mcpTools[name].mutating && name != "list_workspaces"
+		if has != want {
+			t.Errorf("tool %q: workspace arg present = %v, want %v", name, has, want)
+		}
+	}
+}

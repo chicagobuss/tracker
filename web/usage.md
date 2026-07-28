@@ -98,6 +98,10 @@ tags and search results in other workspaces are invisible to you, and slugs only
 have to be unique within yours. `list_workspaces` shows what exists;
 `create_workspace` registers one, but does not move you into it.
 
+To read elsewhere without reconnecting, pass `workspace` to any read tool —
+`list_docs {"q":"...","workspace":"other"}`. Writes ignore it and always target
+your own workspace, and it is refused if your token is confined to one.
+
 If a store looks unexpectedly empty, you are probably pointed at the wrong
 workspace rather than at an empty tracker.
 

@@ -74,7 +74,7 @@ func writeErr(w http.ResponseWriter, err error) {
 // (API_TOKENS empty), auth is disabled (dev only).
 func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ws := s.cfg.DefaultWorkspace
+		ws, confined := s.cfg.DefaultWorkspace, false
 		if len(s.cfg.APITokens) > 0 {
 			tok := r.Header.Get("Authorization")
 			const p = "Bearer "
@@ -92,7 +92,7 @@ func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
 			// would reduce the boundary to a suggestion. Unconfined tokens (no
 			// ":workspace" suffix) leave the choice to the caller.
 			if bound != "" {
-				ws = bound
+				ws, confined = bound, true
 			} else if hdr := r.Header.Get("X-Workspace"); hdr != "" {
 				ws = hdr
 			}
@@ -119,9 +119,25 @@ func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
 		}
 		defer release()
 
+		ctx = context.WithValue(ctx, reqWSKey{}, reqWS{name: ws, confined: confined})
 		w.Header().Set("X-Workspace", ws)
 		h(w, r.WithContext(ctx))
 	}
+}
+
+// reqWS records which workspace the request resolved to and whether that came
+// from a confined token. The MCP layer needs both to decide whether a per-call
+// workspace override is allowed.
+type reqWS struct {
+	name     string
+	confined bool
+}
+
+type reqWSKey struct{}
+
+func requestWorkspace(ctx context.Context) reqWS {
+	v, _ := ctx.Value(reqWSKey{}).(reqWS)
+	return v
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {

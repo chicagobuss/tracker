@@ -232,6 +232,19 @@ itself instead of silently presenting an empty store.
 Everything that predates workspaces lives in `default`, and a request that names
 none resolves there, so existing agents keep working untouched.
 
+Read tools also take an optional `workspace` argument, so one session can search
+another workspace without re-registering the server:
+
+```
+list_docs {"q": "sequencer", "workspace": "scripture"}
+```
+
+It applies to reads only — writes always land in the connection's workspace,
+since an argument that could redirect them makes misfiling too easy — and it is
+refused outright when the token is confined, because the argument is
+caller-supplied and would otherwise hand back the boundary the token exists to
+enforce.
+
 **`X-Workspace` is a preference; a confined token is a boundary.** The header is
 caller-supplied, so on its own it separates work without securing it — fine for
 avoiding context pollution between your own agents. To make it enforceable, bind
