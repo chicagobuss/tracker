@@ -11,8 +11,15 @@ import (
 // Config holds runtime settings, all sourced from the environment.
 type Config struct {
 	DatabaseURL string
-	ListenAddrs []string        // one listener started per address (e.g. LAN + ZeroTier + loopback)
-	APITokens   map[string]bool // bearer tokens; empty => auth disabled (dev only)
+	ListenAddrs []string // one listener started per address (e.g. LAN + ZeroTier + loopback)
+	// Bearer tokens mapped to the workspace they are confined to; empty map =>
+	// auth disabled (dev only). A "" value means the token is unscoped and the
+	// caller picks its workspace with X-Workspace.
+	APITokens map[string]string
+
+	// DefaultWorkspace is used when neither the token nor X-Workspace names one,
+	// which is what keeps pre-workspace agents working unchanged.
+	DefaultWorkspace string
 
 	TaskClaimTTL time.Duration // a 'claimed' task older than this is claimable again
 
@@ -41,7 +48,9 @@ func loadConfig() Config {
 		S3SecretKey: env("S3_SECRET_KEY", ""),
 		S3Bucket:    env("S3_BUCKET", ""),
 		S3UseSSL:    env("S3_USE_SSL", "false") == "true",
-		APITokens:   map[string]bool{},
+		APITokens:   map[string]string{},
+
+		DefaultWorkspace: env("DEFAULT_WORKSPACE", "default"),
 	}
 	c.TaskClaimTTL = time.Hour
 	if d, err := time.ParseDuration(env("TASK_CLAIM_TTL", "1h")); err == nil && d > 0 {
@@ -53,9 +62,16 @@ func loadConfig() Config {
 	if _, err := rand.Read(c.BlobSigningKey); err != nil {
 		panic("blob signing key: " + err.Error())
 	}
+	// "tok" grants access with the caller choosing its workspace; "tok:name"
+	// confines the token to one. Confining is what makes a workspace a boundary
+	// rather than a label, since X-Workspace is caller-supplied.
 	for _, t := range strings.Split(env("API_TOKENS", ""), ",") {
-		if t = strings.TrimSpace(t); t != "" {
-			c.APITokens[t] = true
+		if t = strings.TrimSpace(t); t == "" {
+			continue
+		}
+		tok, ws, _ := strings.Cut(t, ":")
+		if tok = strings.TrimSpace(tok); tok != "" {
+			c.APITokens[tok] = strings.TrimSpace(ws)
 		}
 	}
 	for _, a := range strings.Split(env("LISTEN_ADDR", "127.0.0.1:8770"), ",") {

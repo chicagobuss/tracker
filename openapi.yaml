@@ -55,6 +55,17 @@ components:
       required: true
       schema: { type: string }
       description: The entity performing this action.
+    Workspace:
+      name: X-Workspace
+      in: header
+      required: false
+      schema: { type: string, pattern: '^[a-z0-9][a-z0-9_-]{0,62}$' }
+      description: >
+        Which workspace to act in; defaults to DEFAULT_WORKSPACE. Ignored when
+        the bearer token is confined to a workspace (API_TOKENS=<token>:<name>),
+        since the header is caller-supplied and cannot be a boundary on its own.
+        The workspace actually used is echoed back in the X-Workspace response
+        header.
   schemas:
     Document:
       type: object
@@ -106,6 +117,13 @@ components:
         first_seen: { type: string, format: date-time }
         last_seen: { type: string, format: date-time }
         action_count: { type: integer }
+    Workspace:
+      type: object
+      properties:
+        name: { type: string }
+        description: { type: string }
+        created_by: { type: string }
+        created_at: { type: string, format: date-time }
     Error:
       type: object
       properties:
@@ -471,6 +489,27 @@ paths:
         "200": { description: updated, content: { application/json: { schema: { type: object, properties: { task: { $ref: '#/components/schemas/Task' } } } } } }
         "400": { $ref: '#/components/responses/BadRequest' }
         "409": { description: "not_claimant — task is not claimed, or claimed by another actor", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+
+  /workspaces:
+    get:
+      summary: List workspaces (not itself workspace-scoped — this is how an agent discovers where it may work)
+      responses:
+        "200": { description: workspaces, content: { application/json: { schema: { type: object, properties: { workspaces: { type: array, items: { $ref: '#/components/schemas/Workspace' } }, count: { type: integer } } } } } }
+    post:
+      summary: Register a workspace
+      description: >
+        Creating a workspace does not switch the caller into it; select one per
+        request with the X-Workspace header, or bind a token to it with
+        API_TOKENS=<token>:<workspace>. Unknown names are rejected rather than
+        auto-created, so a typo cannot silently open an empty store.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [name], properties: { name: { type: string, pattern: '^[a-z0-9][a-z0-9_-]{0,62}$' }, description: { type: string } } }
+      responses:
+        "201": { description: created, content: { application/json: { schema: { type: object, properties: { workspace: { $ref: '#/components/schemas/Workspace' } } } } } }
+        "409": { description: already exists }
 
   /actors:
     get:

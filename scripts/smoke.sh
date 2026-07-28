@@ -33,7 +33,7 @@ api() { # api METHOD PATH [curl args...] -> body on stdout, non-2xx is fatal
   local method="$1" path="$2"; shift 2
   local out code
   out="$(curl -sS -X "$method" "$BASE_URL$path" \
-    -H "X-Actor: $ACTOR" "${AUTH[@]}" "$@" -w $'\n%{http_code}')"
+    -H "X-Actor: $ACTOR" ${AUTH[@]+"${AUTH[@]}"} "$@" -w $'\n%{http_code}')"
   code="${out##*$'\n'}"
   out="${out%$'\n'*}"
   if [[ "$code" != 2* ]]; then

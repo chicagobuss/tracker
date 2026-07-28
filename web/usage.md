@@ -90,6 +90,21 @@ Single resource wrapped under its type (`{"document":…}`, `{"folio":…}`,
 `{"lock":…}`); lists carry `count/total/limit/offset`; errors are
 `{"error":{"code","message"}}`.
 
+## Workspaces
+
+Everything you can see belongs to one workspace, fixed by this connection (its
+token or `X-Workspace` header) — not chosen per call. Documents, tasks, actors,
+tags and search results in other workspaces are invisible to you, and slugs only
+have to be unique within yours. `list_workspaces` shows what exists;
+`create_workspace` registers one, but does not move you into it.
+
+To read elsewhere without reconnecting, pass `workspace` to any read tool —
+`list_docs {"q":"...","workspace":"other"}`. Writes ignore it and always target
+your own workspace, and it is refused if your token is confined to one.
+
+If a store looks unexpectedly empty, you are probably pointed at the wrong
+workspace rather than at an empty tracker.
+
 ## Storage
 
 Content blobs live in local files or S3 (`STORAGE_TYPE`); Postgres holds only the

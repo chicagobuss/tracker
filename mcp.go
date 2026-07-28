@@ -88,7 +88,23 @@ func (s *Server) mcpHandler(w http.ResponseWriter, r *http.Request) {
 			rpcResult(w, req.ID, toolError(`X-Actor header required for writes — add --header "X-Actor: <your-agent-name>" to your MCP config`))
 			return
 		}
-		out, err := tool.fn(r.Context(), s, actor, p.Arguments)
+
+		// An optional per-call workspace lets one session read across workspaces
+		// without re-registering the server. Reads only, and never against a
+		// confined token: the argument is caller-supplied, so honouring it there
+		// would hand back the boundary the token exists to enforce.
+		ctx := r.Context()
+		if ws, _ := p.Arguments["workspace"].(string); ws != "" && ws != requestWorkspace(ctx).name {
+			scoped, release, err := s.scopeOverride(ctx, tool, ws)
+			if err != nil {
+				rpcResult(w, req.ID, toolError(err.Error()))
+				return
+			}
+			defer release()
+			ctx = scoped
+		}
+
+		out, err := tool.fn(ctx, s, actor, p.Arguments)
 		if err != nil {
 			rpcResult(w, req.ID, toolError(err.Error()))
 			return
@@ -102,6 +118,27 @@ func (s *Server) mcpHandler(w http.ResponseWriter, r *http.Request) {
 	default:
 		rpcError(w, req.ID, -32601, "method not found: "+req.Method)
 	}
+}
+
+// scopeOverride re-pins the request to another workspace for a single read tool
+// call, refusing the cases where honouring it would be unsafe or misleading.
+func (s *Server) scopeOverride(ctx context.Context, tool mcpTool, ws string) (context.Context, func(), error) {
+	cur := requestWorkspace(ctx)
+	switch {
+	case tool.mutating:
+		// Writes always land in the connection's workspace. Letting an argument
+		// redirect them makes it far too easy to file work in the wrong place.
+		return nil, nil, fmt.Errorf("workspace is a read-only override; this tool writes, and writes always target %q", cur.name)
+	case cur.confined:
+		return nil, nil, fmt.Errorf("this connection's token is confined to workspace %q and cannot read %q", cur.name, ws)
+	case !validWorkspace(ws):
+		return nil, nil, fmt.Errorf("workspace %q is invalid: %s", ws, ErrBadWorkspace.Error())
+	}
+	scoped, release, err := s.store.Scoped(ctx, ws)
+	if err != nil {
+		return nil, nil, fmt.Errorf("workspace %q: %w", ws, err)
+	}
+	return scoped, release, nil
 }
 
 func toolError(msg string) map[string]any {
@@ -189,13 +226,43 @@ var mcpToolOrder = []string{
 	"list_folios", "create_folio", "get_folio", "get_folio_file", "add_folio_file",
 	"list_tasks", "get_task", "enqueue_task", "claim_task", "complete_task",
 	"list_actors", "actor_activity",
+	"list_workspaces", "create_workspace",
+}
+
+var pWorkspace = map[string]any{"type": "string",
+	"description": "Read from this workspace instead of the one this connection is pinned to. Rejected when the connection's token is confined to a workspace."}
+
+// withWorkspaceArg returns schema with the optional per-call workspace override
+// added. Applied centrally at descriptor time rather than written into each
+// tool's schema, so a read tool added later cannot forget it — and so the
+// property stays absent from write tools, which never honour it.
+func withWorkspaceArg(schema map[string]any) map[string]any {
+	props, _ := schema["properties"].(map[string]any)
+	merged := make(map[string]any, len(props)+1)
+	for k, v := range props {
+		merged[k] = v
+	}
+	merged["workspace"] = pWorkspace
+
+	out := make(map[string]any, len(schema))
+	for k, v := range schema {
+		out[k] = v
+	}
+	out["properties"] = merged
+	return out
 }
 
 func mcpToolDescriptors() []map[string]any {
 	out := make([]map[string]any, 0, len(mcpToolOrder))
 	for _, name := range mcpToolOrder {
 		t := mcpTools[name]
-		desc := map[string]any{"name": name, "description": t.desc, "inputSchema": t.schema}
+		schema := t.schema
+		// list_workspaces reads the registry, which is not workspace-scoped, so
+		// an override there would be meaningless.
+		if !t.mutating && name != "list_workspaces" {
+			schema = withWorkspaceArg(schema)
+		}
+		desc := map[string]any{"name": name, "description": t.desc, "inputSchema": schema}
 		if t.annotations != nil {
 			desc["annotations"] = t.annotations
 		}
@@ -476,6 +543,29 @@ var mcpTools = map[string]mcpTool{
 				return nil, err
 			}
 			return map[string]any{"tags": tags, "count": len(tags)}, nil
+		},
+	},
+	"list_workspaces": {
+		desc:   "List workspaces. A workspace is a hard partition of the store: docs, tasks and actors in one are invisible from another, so unrelated work never pollutes your search results. Which one you are in is fixed by this connection (its token or X-Workspace header), not chosen per call.",
+		schema: obj(nil, nil),
+		fn: func(ctx context.Context, s *Server, _ string, _ targs) (any, error) {
+			all, err := s.store.ListWorkspaces(ctx)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"workspaces": all, "count": len(all)}, nil
+		},
+	},
+	"create_workspace": {
+		desc:     "Register a new workspace. Creating one does not switch you into it — point a connection at it with X-Workspace (or a token bound to it) to work there. Names match [a-z0-9][a-z0-9_-]{0,62}.",
+		mutating: true,
+		schema:   obj([]string{"name"}, map[string]any{"name": pStr, "description": pStr}),
+		fn: func(ctx context.Context, s *Server, actor string, a targs) (any, error) {
+			ws, err := s.store.CreateWorkspace(ctx, a.str("name"), a.str("description"), actor)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"workspace": ws}, nil
 		},
 	},
 	"list_folios": {

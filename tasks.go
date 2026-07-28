@@ -49,8 +49,8 @@ func (s *Store) CreateTask(ctx context.Context, title string, payload json.RawMe
 	if len(payload) == 0 {
 		payload = json.RawMessage(`{}`)
 	}
-	t, err := scanTask(s.db.QueryRow(ctx, `
-		insert into tasks (title, payload) values ($1, $2)
+	t, err := scanTask(s.q(ctx).QueryRow(ctx, `
+		insert into tasks (workspace, title, payload) values (current_setting('app.workspace'), $1, $2)
 		returning `+taskSelect, title, payload))
 	if err == nil {
 		s.touchActor(ctx, by)
@@ -63,7 +63,7 @@ func (s *Store) CreateTask(ctx context.Context, title string, payload json.RawMe
 // whose claim is older than ttl is claimable again (its worker is presumed
 // dead), like an expired doc lease. Returns ErrNotFound when nothing is claimable.
 func (s *Store) ClaimNextTask(ctx context.Context, worker string, ttl time.Duration) (*Task, error) {
-	t, err := scanTask(s.db.QueryRow(ctx, `
+	t, err := scanTask(s.q(ctx).QueryRow(ctx, `
 		update tasks set status = 'claimed', claimed_by = $1, claimed_at = now(),
 			attempts = attempts + 1, updated_at = now()
 		where id = (
@@ -82,7 +82,7 @@ func (s *Store) ClaimNextTask(ctx context.Context, worker string, ttl time.Durat
 // ClaimTask claims one specific task by id, under the same claimability rule
 // as ClaimNextTask (open, or claimed with an expired claim).
 func (s *Store) ClaimTask(ctx context.Context, id, worker string, ttl time.Duration) (*Task, error) {
-	t, err := scanTask(s.db.QueryRow(ctx, `
+	t, err := scanTask(s.q(ctx).QueryRow(ctx, `
 		update tasks set status = 'claimed', claimed_by = $2, claimed_at = now(),
 			attempts = attempts + 1, updated_at = now()
 		where id::text = $1
@@ -111,7 +111,7 @@ func (s *Store) CompleteTask(ctx context.Context, id, status string, result json
 	if status != "done" && status != "failed" {
 		return nil, ErrBadTaskStatus
 	}
-	t, err := scanTask(s.db.QueryRow(ctx, `
+	t, err := scanTask(s.q(ctx).QueryRow(ctx, `
 		update tasks set status = $2, result = $3, updated_at = now()
 		where id::text = $1 and status = 'claimed' and claimed_by = $4
 		returning `+taskSelect, id, status, result, by))
@@ -141,11 +141,11 @@ func (s *Store) ListTasks(ctx context.Context, status string, limit, offset int)
 
 	filter := `where ($1 = '' or status = $1)`
 	var total int
-	if err := s.db.QueryRow(ctx, `select count(*) from tasks `+filter, status).Scan(&total); err != nil {
+	if err := s.q(ctx).QueryRow(ctx, `select count(*) from tasks `+filter, status).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 
-	rows, err := s.db.Query(ctx, `select `+taskSelect+` from tasks `+filter+` order by created_at desc limit $2 offset $3`, status, limit, offset)
+	rows, err := s.q(ctx).Query(ctx, `select `+taskSelect+` from tasks `+filter+` order by created_at desc limit $2 offset $3`, status, limit, offset)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -163,5 +163,5 @@ func (s *Store) ListTasks(ctx context.Context, status string, limit, offset int)
 }
 
 func (s *Store) GetTask(ctx context.Context, id string) (*Task, error) {
-	return scanTask(s.db.QueryRow(ctx, `select `+taskSelect+` from tasks where id::text = $1`, id))
+	return scanTask(s.q(ctx).QueryRow(ctx, `select `+taskSelect+` from tasks where id::text = $1`, id))
 }

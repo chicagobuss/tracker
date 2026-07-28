@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -34,7 +35,21 @@ func testStore(t *testing.T) *Store {
 	}
 
 	ctx := context.Background()
-	db, err := pgxpool.New(ctx, url)
+	pcfg, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		t.Fatalf("parse TEST_DATABASE_URL: %v", err)
+	}
+	// These tests call Store methods directly rather than through the HTTP
+	// handlers, so nothing has run Scoped for them and app.workspace would be
+	// undefined — every write would fail on current_setting(). Give each pooled
+	// connection the default workspace so single-workspace tests behave as they
+	// did before workspaces existed. Tests that assert *isolation* call Scoped
+	// themselves; see TestWorkspaceIsolation.
+	pcfg.AfterConnect = func(ctx context.Context, c *pgx.Conn) error {
+		_, err := c.Exec(ctx, `select set_config('app.workspace', 'default', false)`)
+		return err
+	}
+	db, err := pgxpool.NewWithConfig(ctx, pcfg)
 	if err != nil {
 		t.Fatalf("connect postgres: %v", err)
 	}
@@ -58,8 +73,11 @@ func testStore(t *testing.T) *Store {
 	}
 	// Truncate rather than recreate: migrations are the expensive part, and the
 	// cascade clears revisions/locks with the documents that own them.
+	// reset role first: a previous test may have left this connection as
+	// tracker_agent via Scoped, and that role deliberately has no TRUNCATE.
+	// Workspaces are left alone — 'default' is what the rows above hang off.
 	if _, err := db.Exec(ctx,
-		`truncate documents, doc_locks, document_revisions, tasks, actors restart identity cascade`); err != nil {
+		`reset role; truncate documents, doc_locks, document_revisions, tasks, actors restart identity cascade`); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
 	return s
