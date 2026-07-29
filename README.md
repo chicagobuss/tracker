@@ -308,6 +308,57 @@ at `/version`, and recorded in each backup's `manifest.json`.
 Running the binary directly, no container: `make build && set -a && . ./.env &&
 set +a && ./tracker` (needs Go and a reachable Postgres).
 
+## Releasing
+
+Pushing an annotated `v*` tag is the whole ritual. Everything else is CI.
+
+```bash
+git tag -a v1.5.0 -m "v1.5.0 — Short title
+
+What changed and why, in as much detail as it deserves."
+git push origin v1.5.0
+```
+
+That one push runs three jobs in order, each gated on the last:
+
+| Job | Does |
+|---|---|
+| `test` | gofmt, vet, build, `go test -race` against a real pgvector Postgres |
+| `image` | builds and pushes `ghcr.io/chicagobuss/tracker:v1.5.0` (+ `sha-<short>`) |
+| `release` | creates the GitHub Release from the tag's annotation |
+
+Because `release` needs `image`, a Release can never point at a version that
+failed to publish. Re-running a workflow is safe — the job no-ops if the release
+already exists.
+
+**Write the notes in the tag.** The annotation *is* the release: its first line
+becomes the title, everything after it the body. That keeps `git tag -a` the
+single source of truth instead of maintaining a changelog in two places.
+
+**Use `-a`.** A lightweight tag (plain `git tag v1.5.0`) has no annotation, so
+the release falls back to notes generated from the PRs merged since the previous
+tag — serviceable, but blunter than what you'd write. Both `v1.3.0` and the
+release-less `v1.3.1` predate this and show the two failure modes.
+
+`latest` tracks the default branch, not tags. It moves on every push to `main`,
+so it is whatever `main` last built — pin `vX.Y.Z` for anything you actually
+depend on.
+
+Deploying a release depends on how the host runs tracker. A host on the published
+image sets `TRACKER_IMAGE=ghcr.io/chicagobuss/tracker:v1.5.0` in `.env`, then
+`docker compose up -d --wait`. A host that builds from source instead — which is
+what `make deploy` does — pulls the tag and rebuilds:
+
+```bash
+git fetch --tags && git checkout v1.5.0 && make deploy
+```
+
+Either way, confirm what actually landed with `curl <host>:8770/version`. The
+version is `git describe --tags --always --dirty`, so a build from a dirty or
+untagged tree says so rather than quietly claiming a release number — it is
+logged at startup, served at `/version`, and recorded in each backup's
+`manifest.json`.
+
 ## Tests
 
 ```bash
