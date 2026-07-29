@@ -8,7 +8,10 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMPOSE_FILE_PINNED := $(shell sed -n 's/^COMPOSE_FILE=//p' .env 2>/dev/null)
 BUILD ?= $(if $(COMPOSE_FILE_PINNED),,-f docker-compose.yml -f compose.build.yml)
 
-.PHONY: help up down logs smoke build image deploy version test test-docker clean
+# Where CI publishes. `make update TAG=vX.Y.Z` is how a host runs a release.
+IMAGE ?= ghcr.io/chicagobuss/tracker
+
+.PHONY: help up update status down logs smoke build image deploy version test test-docker clean
 
 ## show this help
 help:
@@ -21,6 +24,30 @@ up:
 	@test -f .env || (cp .env.example .env && echo "created .env from .env.example")
 	docker compose up -d --wait
 	@$(MAKE) --no-print-directory smoke
+
+## run a published release on this host: make update TAG=v1.4.2
+update:
+	@test -n "$(TAG)" || { echo "usage: make update TAG=vX.Y.Z   (releases: https://github.com/chicagobuss/tracker/releases)"; exit 1; }
+	@test -f .env || (cp .env.example .env && echo "created .env from .env.example")
+	@case ":$(COMPOSE_FILE_PINNED):" in *compose.build.yml*) \
+	  echo "refusing: COMPOSE_FILE in .env includes compose.build.yml, which pins image: tracker:local"; \
+	  echo "and would override TRACKER_IMAGE with a local build. Drop it from COMPOSE_FILE to run releases,"; \
+	  echo "or use 'make deploy' if this host is meant to build from source."; exit 1;; esac
+	@if grep -q '^TRACKER_IMAGE=' .env; then \
+	  sed -i 's|^TRACKER_IMAGE=.*|TRACKER_IMAGE=$(IMAGE):$(TAG)|' .env; \
+	else printf 'TRACKER_IMAGE=%s:%s\n' '$(IMAGE)' '$(TAG)' >> .env; fi
+	@echo "pinned TRACKER_IMAGE=$(IMAGE):$(TAG) in .env"
+	docker compose pull tracker
+	@$(MAKE) --no-print-directory up
+	@$(MAKE) --no-print-directory status
+
+## show what this host is pinned to vs what it is actually running
+status:
+	@printf 'pinned:  %s\n' "$$(sed -n 's/^TRACKER_IMAGE=//p' .env 2>/dev/null || true)"
+	@printf 'running: '; \
+	  url="$$(sed -n 's/^BASE_URL=//p' .env 2>/dev/null | head -1)"; \
+	  curl -fsS --connect-timeout 3 --max-time 5 "$${url:-http://127.0.0.1:8770}/version" 2>/dev/null || echo unreachable
+	@echo
 
 ## add a welcome doc + example folio to a fresh instance (idempotent)
 seed:
