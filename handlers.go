@@ -548,6 +548,15 @@ func (s *Server) rawRevision(w http.ResponseWriter, r *http.Request) {
 
 func folioTag(slug string) string { return "folio:" + slug }
 
+// folioTags is the tag set a folio member is created with: membership first,
+// then whatever the caller asked for. Callers used to have no way to pass tags
+// here at all, so a create had to be followed by a retag_doc — and tags handed
+// to the create landed in metadata, where nothing queries them. The folio tag
+// leads and the union dedupes, so passing it explicitly is harmless.
+func folioTags(folioSlug string, tags []string) []string {
+	return addTags([]string{folioTag(folioSlug)}, tags)
+}
+
 func (s *Server) listFolios(w http.ResponseWriter, r *http.Request) {
 	folios, total, err := s.store.ListDocuments(r.Context(), "", "folio", "", "", "exclude", 500, 0)
 	if err != nil {
@@ -628,6 +637,7 @@ func (s *Server) createFolioFile(w http.ResponseWriter, r *http.Request) {
 		Filename    string          `json:"filename"`
 		Title       string          `json:"title"`
 		Kind        string          `json:"kind"`
+		Tags        []string        `json:"tags"`
 		Content     string          `json:"content"`
 		ContentType string          `json:"content_type"`
 		Metadata    json.RawMessage `json:"metadata"`
@@ -650,7 +660,7 @@ func (s *Server) createFolioFile(w http.ResponseWriter, r *http.Request) {
 		content = []byte(in.Content)
 	}
 	doc, err := s.store.CreateDocument(r.Context(), folio.Slug+"/"+in.Filename, title, kind,
-		[]string{folioTag(folio.Slug)}, meta, content, in.ContentType, actor)
+		folioTags(folio.Slug, in.Tags), meta, content, in.ContentType, actor)
 	if err != nil {
 		writeErr(w, err)
 		return

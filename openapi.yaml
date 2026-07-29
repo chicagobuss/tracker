@@ -412,6 +412,14 @@ paths:
                 filename: { type: string }
                 title: { type: string }
                 kind: { type: string, default: note }
+                tags:
+                  type: array
+                  items: { type: string }
+                  description: >-
+                    Tags to set at creation, unioned with the server-applied
+                    folio:<slug> membership tag. Note that tags passed inside
+                    `metadata` are not searchable — only real tags are matched
+                    by the `tag` filter on GET /docs.
                 content: { type: string }
                 content_type: { type: string, default: text/markdown }
                 metadata: { type: object, additionalProperties: true }

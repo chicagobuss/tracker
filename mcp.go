@@ -633,10 +633,10 @@ var mcpTools = map[string]mcpTool{
 		},
 	},
 	"add_folio_file": {
-		desc:     "Add a file (document) to a folio; the folio: tag and <folio>/<filename> slug are applied server-side.",
+		desc:     "Add a file (document) to a folio; the folio: tag and <folio>/<filename> slug are applied server-side. Pass tags to set them at creation — metadata is not searchable by tag.",
 		mutating: true,
 		schema: obj([]string{"slug", "filename"}, map[string]any{"slug": pStr, "filename": pStr,
-			"title": pStr, "kind": pStr, "content": pStr, "content_type": pStr, "metadata": pObj}),
+			"title": pStr, "kind": pStr, "tags": pStrs, "content": pStr, "content_type": pStr, "metadata": pObj}),
 		fn: func(ctx context.Context, s *Server, actor string, a targs) (any, error) {
 			folio, err := s.store.GetDocument(ctx, a.str("slug"))
 			if err != nil {
@@ -662,7 +662,7 @@ var mcpTools = map[string]mcpTool{
 				content = []byte(c)
 			}
 			doc, err := s.store.CreateDocument(ctx, folio.Slug+"/"+a.str("filename"), title, kind,
-				[]string{folioTag(folio.Slug)}, meta, content, a.str("content_type"), actor)
+				folioTags(folio.Slug, a.strs("tags")), meta, content, a.str("content_type"), actor)
 			if err != nil {
 				return nil, err
 			}

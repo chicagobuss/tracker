@@ -512,3 +512,73 @@ func TestWorkspaceArgOnReadToolsOnly(t *testing.T) {
 		}
 	}
 }
+
+// The regression this fixes: a folio file created with tags was not findable by
+// tag. add_folio_file took no tags argument, so callers passed them as metadata
+// — which the tag filter does not search — and the create silently succeeded
+// with only the membership tag. Drive the real tool with JSON-shaped args, then
+// query the way a caller looking for that document would.
+func TestAddFolioFile_TagsAreSearchable(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	srv := &Server{store: s, cfg: Config{DefaultWorkspace: "default"}}
+
+	if _, err := mcpTools["create_folio"].fn(ctx, srv, "tester", targs{
+		"slug": "beta-course", "title": "Beta",
+	}); err != nil {
+		t.Fatalf("create_folio: %v", err)
+	}
+
+	// []any, not []string: this is the shape a decoded JSON-RPC array arrives in,
+	// and targs.strs only unwraps that one.
+	if _, err := mcpTools["add_folio_file"].fn(ctx, srv, "tester", targs{
+		"slug": "beta-course", "filename": "current.md", "kind": "decision",
+		"tags": []any{"course:beta", "status:active"}, "content": "# Beta",
+	}); err != nil {
+		t.Fatalf("add_folio_file: %v", err)
+	}
+
+	for _, tag := range []string{"course:beta", "status:active", "folio:beta-course"} {
+		docs, total, err := s.ListDocuments(ctx, "", "", tag, "", "exclude", 50, 0)
+		if err != nil {
+			t.Fatalf("list by %s: %v", tag, err)
+		}
+		if total != 1 {
+			t.Fatalf("tag %s matched %d documents, want 1", tag, total)
+		}
+		if docs[0].Slug != "beta-course/current.md" {
+			t.Errorf("tag %s matched %q, want beta-course/current.md", tag, docs[0].Slug)
+		}
+	}
+}
+
+// Membership is a tag, so a caller passing tags must not be able to drop the
+// document out of its own folio.
+func TestAddFolioFile_CallerTagsCannotDisplaceMembership(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	srv := &Server{store: s, cfg: Config{DefaultWorkspace: "default"}}
+
+	if _, err := mcpTools["create_folio"].fn(ctx, srv, "tester", targs{"slug": "f", "title": "F"}); err != nil {
+		t.Fatalf("create_folio: %v", err)
+	}
+	if _, err := mcpTools["add_folio_file"].fn(ctx, srv, "tester", targs{
+		"slug": "f", "filename": "a.md", "tags": []any{"topic:x"},
+	}); err != nil {
+		t.Fatalf("add_folio_file: %v", err)
+	}
+
+	// Query membership the way the folio itself does, rather than through the
+	// MCP response envelope: get_folio summarises its files, so asserting on
+	// that shape would test the envelope instead of the tag.
+	docs, total, err := s.ListDocuments(ctx, "", "", folioTag("f"), "", "exclude", 50, 0)
+	if err != nil {
+		t.Fatalf("list by folio tag: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("folio holds %d files, want 1 — caller tags displaced membership", total)
+	}
+	if docs[0].Slug != "f/a.md" {
+		t.Errorf("folio member = %q, want f/a.md", docs[0].Slug)
+	}
+}
