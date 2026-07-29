@@ -287,13 +287,27 @@ backlog).
 ## Ops
 
 ```bash
-make up                                # start (creates .env if missing) + smoke test
+make update TAG=v1.5.0                 # run a published release here (the standard deploy)
+make status                            # what this host is pinned to vs what it runs
+make up                                # start with whatever .env pins + smoke test
 make down                              # stop; data survives in the pgdata volume
 make logs                              # follow tracker logs
 make smoke                             # prove a running instance round-trips a write
-make deploy                            # rebuild from source w/ version + restart
-curl http://127.0.0.1:8770/version     # version the running binary reports
+make deploy                            # DEV: rebuild from your working tree instead
 ```
+
+**The standard deploy is `make update TAG=vX.Y.Z`.** It pins `TRACKER_IMAGE` in
+`.env`, pulls that release, restarts, smoke-tests the write path, and prints the
+version the binary actually reports. Rolling back is the same command with an
+earlier tag, so what a host runs is always one greppable line in its `.env`
+rather than whatever its working tree happened to contain.
+
+`make deploy` is the development path: it builds your working tree instead of
+running a release, so the version it stamps is a `git describe` string that
+matches no release. Hosts that build this way set `COMPOSE_FILE` in `.env` to
+include `compose.build.yml`, whose `image: tracker:local` overrides
+`TRACKER_IMAGE` — `make update` detects that and refuses rather than pinning a
+release the stack would ignore.
 
 `make up` pulls the published image. Contributors who want their working tree
 built instead use the build override (that's what `make deploy` does):
@@ -344,16 +358,18 @@ release-less `v1.3.1` predate this and show the two failure modes.
 so it is whatever `main` last built — pin `vX.Y.Z` for anything you actually
 depend on.
 
-Deploying a release depends on how the host runs tracker. A host on the published
-image sets `TRACKER_IMAGE=ghcr.io/chicagobuss/tracker:v1.5.0` in `.env`, then
-`docker compose up -d --wait`. A host that builds from source instead — which is
-what `make deploy` does — pulls the tag and rebuilds:
+Deploying it is one command on the host, and the same one everywhere:
 
 ```bash
-git fetch --tags && git checkout v1.5.0 && make deploy
+make update TAG=v1.5.0
 ```
 
-Either way, confirm what actually landed with `curl <host>:8770/version`. The
+That pins `TRACKER_IMAGE` in `.env`, pulls, restarts, smoke-tests, and reports
+the running version. It needs no Go toolchain and no checkout of the tag — the
+artifact is the one CI built and tested from that commit, not a local rebuild of
+it. Roll back by naming an earlier tag.
+
+Confirm what actually landed with `make status` or `curl <host>:8770/version`. The
 version is `git describe --tags --always --dirty`, so a build from a dirty or
 untagged tree says so rather than quietly claiming a release number — it is
 logged at startup, served at `/version`, and recorded in each backup's
