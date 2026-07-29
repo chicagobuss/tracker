@@ -27,3 +27,34 @@ func TestToolSchemasHaveNonNullProperties(t *testing.T) {
 		}
 	}
 }
+
+// add_folio_file shipped without a tags argument while create_doc had one, so
+// the two document-creating surfaces disagreed about whether tags were settable
+// at creation. An agent reaching for the folio one had no way to set a tag and
+// no error saying so — tags passed as metadata just went inert. Assert the
+// surfaces agree, so a third creation tool cannot quietly omit it either.
+func TestCreationToolsAcceptTags(t *testing.T) {
+	for _, name := range []string{"create_doc", "add_folio_file"} {
+		tool, ok := mcpTools[name]
+		if !ok {
+			t.Fatalf("%s: not in mcpTools", name)
+		}
+		props, ok := tool.schema["properties"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s: schema has no properties map", name)
+		}
+		tags, ok := props["tags"]
+		if !ok {
+			t.Errorf("%s: schema has no 'tags' property; tags would silently have to go in metadata, where nothing queries them", name)
+			continue
+		}
+		spec, ok := tags.(map[string]any)
+		if !ok {
+			t.Errorf("%s: 'tags' is %T, want a schema object", name, tags)
+			continue
+		}
+		if spec["type"] != "array" {
+			t.Errorf("%s: 'tags' type = %v, want array", name, spec["type"])
+		}
+	}
+}
