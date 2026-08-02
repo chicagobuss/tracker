@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http/httptest"
 	"strings"
@@ -440,9 +442,9 @@ func TestScopedRejectsUnknownWorkspace(t *testing.T) {
 	}
 }
 
-// The per-call workspace override is a convenience for reading across
+// The per-call workspace override is a convenience for working across
 // workspaces from one session, so its refusals are the interesting part: it
-// must not become a way around a confined token or a way to misfile a write.
+// must not become a way around a confined token.
 func TestScopeOverride(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -456,11 +458,8 @@ func TestScopeOverride(t *testing.T) {
 	free := context.WithValue(ctx, reqWSKey{}, reqWS{name: "default"})
 	confined := context.WithValue(ctx, reqWSKey{}, reqWS{name: "alpha", confined: true})
 
-	read := mcpTools["list_docs"]
-	write := mcpTools["create_doc"]
-
 	t.Run("allowed for a read on an unconfined token", func(t *testing.T) {
-		scoped, release, err := srv.scopeOverride(free, read, "alpha")
+		scoped, release, err := srv.scopeOverride(free, "alpha")
 		if err != nil {
 			t.Fatalf("override: %v", err)
 		}
@@ -474,19 +473,41 @@ func TestScopeOverride(t *testing.T) {
 		}
 	})
 
+	t.Run("allowed for a write on an unconfined token", func(t *testing.T) {
+		scoped, release, err := srv.scopeOverride(free, "alpha")
+		if err != nil {
+			t.Fatalf("override: %v", err)
+		}
+		defer release()
+		if _, err := s.CreateDocument(scoped, "override-write", "t", "note", nil, nil, nil, "", "tester"); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		// Readable from the override target...
+		if _, err := s.GetDocument(scoped, "override-write"); err != nil {
+			t.Errorf("alpha cannot read the doc it just wrote: %v", err)
+		}
+		// ...and invisible from the connection's own workspace.
+		def, defRelease, err := s.Scoped(ctx, "default")
+		if err != nil {
+			t.Fatalf("scope default: %v", err)
+		}
+		defer defRelease()
+		if _, err := s.GetDocument(def, "override-write"); !errors.Is(err, ErrNotFound) {
+			t.Errorf("default workspace sees the doc: err = %v, want not found", err)
+		}
+	})
+
 	for _, tc := range []struct {
 		name, ws, wantSubstr string
 		ctx                  context.Context
-		tool                 mcpTool
 	}{
-		{"confined token cannot escape", "default", "confined to workspace", confined, read},
-		{"writes are never redirected", "alpha", "read-only override", free, write},
-		{"sentinel is unreachable", AllWorkspaces, "invalid", free, read},
-		{"invalid name refused", "Alpha", "invalid", free, read},
-		{"unknown workspace refused", "no-such-ws", "unknown workspace", free, read},
+		{"confined token cannot escape", "default", "confined to workspace", confined},
+		{"sentinel is unreachable", AllWorkspaces, "invalid", free},
+		{"invalid name refused", "Alpha", "invalid", free},
+		{"unknown workspace refused", "no-such-ws", "unknown workspace", free},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, release, err := srv.scopeOverride(tc.ctx, tc.tool, tc.ws)
+			_, release, err := srv.scopeOverride(tc.ctx, tc.ws)
 			if err == nil {
 				release()
 				t.Fatalf("override to %q was allowed; want refusal", tc.ws)
@@ -498,19 +519,86 @@ func TestScopeOverride(t *testing.T) {
 	}
 }
 
-// Every read tool should advertise the override, and no write tool should.
-func TestWorkspaceArgOnReadToolsOnly(t *testing.T) {
+// Every workspace-scoped tool should advertise the override; the two registry
+// tools (list_workspaces, create_workspace) should not.
+func TestWorkspaceArgOnScopedTools(t *testing.T) {
 	for _, d := range mcpToolDescriptors() {
 		name := d["name"].(string)
 		schema := d["inputSchema"].(map[string]any)
 		props, _ := schema["properties"].(map[string]any)
 		_, has := props["workspace"]
 
-		want := !mcpTools[name].mutating && name != "list_workspaces"
+		want := name != "list_workspaces" && name != "create_workspace"
 		if has != want {
 			t.Errorf("tool %q: workspace arg present = %v, want %v", name, has, want)
 		}
 	}
+}
+
+// The override is decided in mcpHandler, so pin its edge cases end to end:
+// registry tools must ignore a workspace passed by a client the schema never
+// offered one to, and a confined token naming its own workspace must sail
+// through the bypass rather than trip the confined check.
+func TestMCPHandlerWorkspaceOverride(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if _, err := s.CreateWorkspace(ctx, "alpha", "greenfield", "tester"); err != nil &&
+		!errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("create workspace: %v", err)
+	}
+	srv := &Server{store: s, cfg: Config{DefaultWorkspace: "default"}}
+
+	pinned := func(name string, confined bool) (context.Context, func()) {
+		scoped, release, err := s.Scoped(ctx, name)
+		if err != nil {
+			t.Fatalf("scope %q: %v", name, err)
+		}
+		return context.WithValue(scoped, reqWSKey{}, reqWS{name: name, confined: confined}), release
+	}
+
+	call := func(ctx context.Context, name string, args map[string]any) (bool, string) {
+		params, _ := json.Marshal(map[string]any{"name": name, "arguments": args})
+		raw, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1,
+			"method": "tools/call", "params": json.RawMessage(params)})
+		req := httptest.NewRequest("POST", "/mcp", bytes.NewReader(raw)).WithContext(ctx)
+		req.Header.Set("X-Actor", "tester")
+		w := httptest.NewRecorder()
+		srv.mcpHandler(w, req)
+		return strings.Contains(w.Body.String(), `"isError":true`), w.Body.String()
+	}
+
+	t.Run("registry tool ignores a passed workspace", func(t *testing.T) {
+		c, release := pinned("default", false)
+		defer release()
+		// no-such-ws would fail scopeOverride; success proves it was ignored.
+		if isErr, body := call(c, "list_workspaces", map[string]any{"workspace": "no-such-ws"}); isErr {
+			t.Fatalf("list_workspaces honoured the override: %s", body)
+		}
+	})
+
+	t.Run("confined token naming its own workspace succeeds", func(t *testing.T) {
+		c, release := pinned("alpha", true)
+		defer release()
+		if isErr, body := call(c, "list_docs", map[string]any{"workspace": "alpha"}); isErr {
+			t.Fatalf("own-workspace call refused: %s", body)
+		}
+	})
+
+	t.Run("write through the handler lands in the override workspace", func(t *testing.T) {
+		c, release := pinned("default", false)
+		defer release()
+		if isErr, body := call(c, "create_doc", map[string]any{"slug": "handler-write", "workspace": "alpha"}); isErr {
+			t.Fatalf("create_doc refused: %s", body)
+		}
+		def, defRelease, err := s.Scoped(ctx, "default")
+		if err != nil {
+			t.Fatalf("scope default: %v", err)
+		}
+		defer defRelease()
+		if _, err := s.GetDocument(def, "handler-write"); !errors.Is(err, ErrNotFound) {
+			t.Errorf("default workspace sees the doc: err = %v, want not found", err)
+		}
+	})
 }
 
 // The regression this fixes: a folio file created with tags was not findable by

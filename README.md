@@ -232,18 +232,20 @@ itself instead of silently presenting an empty store.
 Everything that predates workspaces lives in `default`, and a request that names
 none resolves there, so existing agents keep working untouched.
 
-Read tools also take an optional `workspace` argument, so one session can search
+Tools also take an optional `workspace` argument, so one session can work in
 another workspace without re-registering the server:
 
 ```
-list_docs {"q": "sequencer", "workspace": "scripture"}
+list_docs  {"q": "sequencer", "workspace": "scripture"}
+create_doc {"slug": "note", "workspace": "scripture", ...}
 ```
 
-It applies to reads only — writes always land in the connection's workspace,
-since an argument that could redirect them makes misfiling too easy — and it is
-refused outright when the token is confined, because the argument is
-caller-supplied and would otherwise hand back the boundary the token exists to
-enforce.
+Mind where you point a write: a `create_doc` aimed at the wrong workspace
+misfiles the doc, and nothing will warn you — the argument is honoured
+verbatim. It is refused outright when the token is confined, because the
+argument is caller-supplied and would otherwise hand back the boundary the
+token exists to enforce. The registry tools (`list_workspaces`,
+`create_workspace`) take no override; the registry is not workspace-scoped.
 
 **`X-Workspace` is a preference; a confined token is a boundary.** The header is
 caller-supplied, so on its own it separates work without securing it — fine for

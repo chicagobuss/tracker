@@ -52,16 +52,17 @@ override it.
 - `list_workspaces()` — discover where you may work. Not itself scoped.
 - `create_workspace(name)` — register one. **Creating it does not switch you
   into it.** Names match `[a-z0-9][a-z0-9_-]{0,62}`.
-- **Reads** can target another workspace per call: `list_docs`, `get_doc`,
-  `list_folios`, `get_folio`, `get_folio_file` accept `workspace=`. Rejected
-  when your token is confined.
-- **Writes cannot.** `create_doc`, `add_folio_file`, `create_folio`,
-  `update_doc`, `retag_doc` and the delete tools have no workspace argument —
-  they always land in your connection's workspace.
+- **Every scoped tool** — reads and writes — accepts a per-call `workspace=`
+  override, so one session can work across workspaces without re-registering
+  the server. Rejected when your token is confined. The registry tools
+  (`list_workspaces`, `create_workspace`) take no override.
+- **A write override is honoured verbatim** — `create_doc` aimed at the wrong
+  workspace misfiles the doc with no warning. Double-check the target, and
+  omit `workspace=` unless you mean to cross.
 
-So to write into a workspace, **point a connection at it** rather than reaching
-for curl. `POST /mcp` runs the same auth middleware as the REST API, so the
-header works there too — register a second server:
+For long-running work in one workspace you can still **point a connection at
+it**: `POST /mcp` runs the same auth middleware as the REST API, so the header
+works there too — register a second server:
 
 ```
 claude mcp add --scope user --transport http tracker-<ws> <base>/mcp \
