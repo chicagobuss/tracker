@@ -34,7 +34,8 @@ update:
 	  echo "and would override TRACKER_IMAGE with a local build. Drop it from COMPOSE_FILE to run releases,"; \
 	  echo "or use 'make deploy' if this host is meant to build from source."; exit 1;; esac
 	@if grep -q '^TRACKER_IMAGE=' .env; then \
-	  sed -i 's|^TRACKER_IMAGE=.*|TRACKER_IMAGE=$(IMAGE):$(TAG)|' .env; \
+	  tmp=$$(mktemp) && sed 's|^TRACKER_IMAGE=.*|TRACKER_IMAGE=$(IMAGE):$(TAG)|' .env > "$$tmp" \
+	    && cat "$$tmp" > .env && rm -f "$$tmp"; \
 	else printf 'TRACKER_IMAGE=%s:%s\n' '$(IMAGE)' '$(TAG)' >> .env; fi
 	@echo "pinned TRACKER_IMAGE=$(IMAGE):$(TAG) in .env"
 	docker compose pull tracker
@@ -75,6 +76,11 @@ image:
 
 ## rebuild the image from source + (re)start the container (no sudo)
 deploy:
+	@if grep -q '^TRACKER_IMAGE=' .env 2>/dev/null && [ -z "$(BUILD)" ]; then \
+	  echo "refusing: this host is pinned to $$(sed -n 's/^TRACKER_IMAGE=//p' .env) and runs a published"; \
+	  echo "image, so there is nothing to build — 'make deploy' would report success and change nothing."; \
+	  echo "Use 'make update TAG=vX.Y.Z' to move it, or 'make deploy BUILD=-f docker-compose.yml -f compose.build.yml'"; \
+	  echo "to deliberately build from source here."; exit 1; fi
 	TRACKER_VERSION=$(VERSION) docker compose $(BUILD) up -d --build tracker
 
 ## print the version that would be embedded
