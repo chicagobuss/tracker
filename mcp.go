@@ -89,13 +89,16 @@ func (s *Server) mcpHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// An optional per-call workspace lets one session read across workspaces
-		// without re-registering the server. Reads only, and never against a
-		// confined token: the argument is caller-supplied, so honouring it there
-		// would hand back the boundary the token exists to enforce.
+		// An optional per-call workspace lets one session work across workspaces
+		// without re-registering the server. Never honoured against a confined
+		// token: the argument is caller-supplied, so honouring it there would
+		// hand back the boundary the token exists to enforce. Registry tools are
+		// not workspace-scoped, so an override there is meaningless — ignore it
+		// even if a client passes one the schema never advertised.
 		ctx := r.Context()
-		if ws, _ := p.Arguments["workspace"].(string); ws != "" && ws != requestWorkspace(ctx).name {
-			scoped, release, err := s.scopeOverride(ctx, tool, ws)
+		registryTool := p.Name == "list_workspaces" || p.Name == "create_workspace"
+		if ws, _ := p.Arguments["workspace"].(string); !registryTool && ws != "" && ws != requestWorkspace(ctx).name {
+			scoped, release, err := s.scopeOverride(ctx, ws)
 			if err != nil {
 				rpcResult(w, req.ID, toolError(err.Error()))
 				return
@@ -120,17 +123,13 @@ func (s *Server) mcpHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// scopeOverride re-pins the request to another workspace for a single read tool
+// scopeOverride re-pins the request to another workspace for a single tool
 // call, refusing the cases where honouring it would be unsafe or misleading.
-func (s *Server) scopeOverride(ctx context.Context, tool mcpTool, ws string) (context.Context, func(), error) {
+func (s *Server) scopeOverride(ctx context.Context, ws string) (context.Context, func(), error) {
 	cur := requestWorkspace(ctx)
 	switch {
-	case tool.mutating:
-		// Writes always land in the connection's workspace. Letting an argument
-		// redirect them makes it far too easy to file work in the wrong place.
-		return nil, nil, fmt.Errorf("workspace is a read-only override; this tool writes, and writes always target %q", cur.name)
 	case cur.confined:
-		return nil, nil, fmt.Errorf("this connection's token is confined to workspace %q and cannot read %q", cur.name, ws)
+		return nil, nil, fmt.Errorf("this connection's token is confined to workspace %q and cannot target %q", cur.name, ws)
 	case !validWorkspace(ws):
 		return nil, nil, fmt.Errorf("workspace %q is invalid: %s", ws, ErrBadWorkspace.Error())
 	}
@@ -236,12 +235,11 @@ var mcpToolOrder = []string{
 }
 
 var pWorkspace = map[string]any{"type": "string",
-	"description": "Read from this workspace instead of the one this connection is pinned to. Rejected when the connection's token is confined to a workspace."}
+	"description": "Work in this workspace instead of the one this connection is pinned to, for this call only. Rejected when the connection's token is confined to a workspace."}
 
 // withWorkspaceArg returns schema with the optional per-call workspace override
 // added. Applied centrally at descriptor time rather than written into each
-// tool's schema, so a read tool added later cannot forget it — and so the
-// property stays absent from write tools, which never honour it.
+// tool's schema, so a tool added later cannot forget it.
 func withWorkspaceArg(schema map[string]any) map[string]any {
 	props, _ := schema["properties"].(map[string]any)
 	merged := make(map[string]any, len(props)+1)
@@ -263,9 +261,9 @@ func mcpToolDescriptors() []map[string]any {
 	for _, name := range mcpToolOrder {
 		t := mcpTools[name]
 		schema := t.schema
-		// list_workspaces reads the registry, which is not workspace-scoped, so
-		// an override there would be meaningless.
-		if !t.mutating && name != "list_workspaces" {
+		// list_workspaces reads and create_workspace writes the registry, which
+		// is not workspace-scoped, so an override there would be meaningless.
+		if name != "list_workspaces" && name != "create_workspace" {
 			schema = withWorkspaceArg(schema)
 		}
 		desc := map[string]any{"name": name, "description": t.desc, "inputSchema": schema}
