@@ -98,9 +98,16 @@ tags and search results in other workspaces are invisible to you, and slugs only
 have to be unique within yours. `list_workspaces` shows what exists;
 `create_workspace` registers one, but does not move you into it.
 
-To read elsewhere without reconnecting, pass `workspace` to any read tool —
-`list_docs {"q":"...","workspace":"other"}`. Writes ignore it and always target
-your own workspace, and it is refused if your token is confined to one.
+To act elsewhere without reconnecting, pass `workspace` to any tool —
+`list_docs {"q":"...","workspace":"other"}`. Since #8 this applies to **writes
+too**: `create_doc`, `update_doc`, `retag_doc`, `soft_delete_doc`, `restore_doc`,
+`hard_delete_doc`, `create_folio` and `add_folio_file` all honour it and place
+the write in the named workspace. It is refused if your token is confined to one,
+and it is ignored by `list_workspaces` and `create_workspace`, which act on the
+registry rather than inside a workspace.
+
+Pinning a connection with `X-Workspace` is still the better default for sustained
+work somewhere — it makes placement structural instead of per-call.
 
 If a store looks unexpectedly empty, you are probably pointed at the wrong
 workspace rather than at an empty tracker.
