@@ -49,13 +49,29 @@ func (s *Store) CreateTask(ctx context.Context, title string, payload json.RawMe
 	if len(payload) == 0 {
 		payload = json.RawMessage(`{}`)
 	}
-	t, err := scanTask(s.q(ctx).QueryRow(ctx, `
+	tx, err := s.q(ctx).Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	t, err := scanTask(tx.QueryRow(ctx, `
 		insert into tasks (workspace, title, payload) values (current_setting('app.workspace'), $1, $2)
 		returning `+taskSelect, title, payload))
-	if err == nil {
-		s.touchActor(ctx, by)
+	if err != nil {
+		return nil, err
 	}
-	return t, err
+	if _, err := tx.Exec(ctx, `
+		insert into events (workspace, kind, actor, task_id)
+		values (current_setting('app.workspace'), 'task_enqueued', $1, $2)`,
+		by, t.ID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	s.touchActor(ctx, by)
+	return t, nil
 }
 
 // ClaimNextTask atomically grabs the oldest claimable task using FOR UPDATE
@@ -63,7 +79,13 @@ func (s *Store) CreateTask(ctx context.Context, title string, payload json.RawMe
 // whose claim is older than ttl is claimable again (its worker is presumed
 // dead), like an expired doc lease. Returns ErrNotFound when nothing is claimable.
 func (s *Store) ClaimNextTask(ctx context.Context, worker string, ttl time.Duration) (*Task, error) {
-	t, err := scanTask(s.q(ctx).QueryRow(ctx, `
+	tx, err := s.q(ctx).Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	t, err := scanTask(tx.QueryRow(ctx, `
 		update tasks set status = 'claimed', claimed_by = $1, claimed_at = now(),
 			attempts = attempts + 1, updated_at = now()
 		where id = (
@@ -73,16 +95,32 @@ func (s *Store) ClaimNextTask(ctx context.Context, worker string, ttl time.Durat
 			order by created_at for update skip locked limit 1
 		)
 		returning `+taskSelect, worker, ttl.Seconds()))
-	if err == nil {
-		s.touchActor(ctx, worker)
+	if err != nil {
+		return nil, err
 	}
-	return t, err
+	if _, err := tx.Exec(ctx, `
+		insert into events (workspace, kind, actor, task_id)
+		values (current_setting('app.workspace'), 'task_claimed', $1, $2)`,
+		worker, t.ID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	s.touchActor(ctx, worker)
+	return t, nil
 }
 
 // ClaimTask claims one specific task by id, under the same claimability rule
 // as ClaimNextTask (open, or claimed with an expired claim).
 func (s *Store) ClaimTask(ctx context.Context, id, worker string, ttl time.Duration) (*Task, error) {
-	t, err := scanTask(s.q(ctx).QueryRow(ctx, `
+	tx, err := s.q(ctx).Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	t, err := scanTask(tx.QueryRow(ctx, `
 		update tasks set status = 'claimed', claimed_by = $2, claimed_at = now(),
 			attempts = attempts + 1, updated_at = now()
 		where id::text = $1
@@ -90,7 +128,7 @@ func (s *Store) ClaimTask(ctx context.Context, id, worker string, ttl time.Durat
 		returning `+taskSelect, id, worker, ttl.Seconds()))
 	if errors.Is(err, ErrNotFound) {
 		// No row updated: distinguish a missing task from an unclaimable one.
-		cur, gerr := s.GetTask(ctx, id)
+		cur, gerr := scanTask(tx.QueryRow(ctx, `select `+taskSelect+` from tasks where id::text = $1`, id))
 		if gerr != nil {
 			return nil, gerr
 		}
@@ -99,10 +137,20 @@ func (s *Store) ClaimTask(ctx context.Context, id, worker string, ttl time.Durat
 		}
 		return nil, fmt.Errorf("%w: status is %s", ErrNotClaimable, cur.Status)
 	}
-	if err == nil {
-		s.touchActor(ctx, worker)
+	if err != nil {
+		return nil, err
 	}
-	return t, err
+	if _, err := tx.Exec(ctx, `
+		insert into events (workspace, kind, actor, task_id)
+		values (current_setting('app.workspace'), 'task_claimed', $1, $2)`,
+		worker, t.ID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	s.touchActor(ctx, worker)
+	return t, nil
 }
 
 // CompleteTask sets a terminal status (done/failed) and stores the result. The
@@ -111,21 +159,37 @@ func (s *Store) CompleteTask(ctx context.Context, id, status string, result json
 	if status != "done" && status != "failed" {
 		return nil, ErrBadTaskStatus
 	}
-	t, err := scanTask(s.q(ctx).QueryRow(ctx, `
+	tx, err := s.q(ctx).Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	t, err := scanTask(tx.QueryRow(ctx, `
 		update tasks set status = $2, result = $3, updated_at = now()
 		where id::text = $1 and status = 'claimed' and claimed_by = $4
 		returning `+taskSelect, id, status, result, by))
 	if errors.Is(err, ErrNotFound) {
 		// No row updated: distinguish a missing task from one the caller doesn't hold.
-		if _, gerr := s.GetTask(ctx, id); gerr != nil {
+		if _, gerr := scanTask(tx.QueryRow(ctx, `select `+taskSelect+` from tasks where id::text = $1`, id)); gerr != nil {
 			return nil, gerr
 		}
 		return nil, ErrNotClaimant
 	}
-	if err == nil {
-		s.touchActor(ctx, by)
+	if err != nil {
+		return nil, err
 	}
-	return t, err
+	if _, err := tx.Exec(ctx, `
+		insert into events (workspace, kind, actor, task_id)
+		values (current_setting('app.workspace'), 'task_completed', $1, $2)`,
+		by, t.ID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	s.touchActor(ctx, by)
+	return t, nil
 }
 
 func (s *Store) ListTasks(ctx context.Context, status string, limit, offset int) ([]Task, int, error) {

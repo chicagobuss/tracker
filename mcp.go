@@ -131,12 +131,13 @@ func (s *Server) scopeOverride(ctx context.Context, ws string) (context.Context,
 	case cur.confined:
 		return nil, nil, fmt.Errorf("this connection's token is confined to workspace %q and cannot target %q", cur.name, ws)
 	case !validWorkspace(ws):
-		return nil, nil, fmt.Errorf("workspace %q is invalid: %s", ws, ErrBadWorkspace.Error())
+		return nil, nil, fmt.Errorf("workspace %q is invalid: %w", ws, ErrBadWorkspace)
 	}
 	scoped, release, err := s.store.Scoped(ctx, ws)
 	if err != nil {
 		return nil, nil, fmt.Errorf("workspace %q: %w", ws, err)
 	}
+	scoped = context.WithValue(scoped, reqWSKey{}, reqWS{name: ws, confined: cur.confined})
 	return scoped, release, nil
 }
 
@@ -232,6 +233,7 @@ var mcpToolOrder = []string{
 	"list_tasks", "get_task", "enqueue_task", "claim_task", "complete_task",
 	"list_actors", "actor_activity",
 	"list_workspaces", "create_workspace",
+	"list_changes",
 }
 
 var pWorkspace = map[string]any{"type": "string",
@@ -770,6 +772,41 @@ var mcpTools = map[string]mcpTool{
 				return nil, err
 			}
 			return map[string]any{"activity": items, "count": len(items)}, nil
+		},
+	},
+	"list_changes": {
+		desc: `List change events in sequence. since is the exclusive cursor (<workspace>:<kindshash>:<xact_id>:<id>); kind filters by event types (e.g. doc_created, doc_updated, task_completed). Returns {count, events, next_cursor}.`,
+		schema: obj(nil, map[string]any{
+			"since": pStr,
+			"kind":  map[string]any{"type": "array", "items": pStr, "description": "Filter by event kinds (e.g. doc_created, task_enqueued)"},
+			"limit": pInt,
+		}),
+		fn: func(ctx context.Context, s *Server, _ string, a targs) (any, error) {
+			since := a.str("since")
+			limit := a.num("limit", 100)
+			var rawKinds []string
+			if raw, ok := a["kind"].([]any); ok {
+				for _, v := range raw {
+					if str, ok := v.(string); ok && str != "" {
+						rawKinds = append(rawKinds, str)
+					}
+				}
+			} else if str := a.str("kind"); str != "" {
+				rawKinds = append(rawKinds, str)
+			}
+			kinds := normalizeKinds(rawKinds)
+			events, nextCursor, err := s.store.ListEvents(ctx, since, kinds, limit)
+			if err != nil {
+				return nil, err
+			}
+			if events == nil {
+				events = []Event{}
+			}
+			return map[string]any{
+				"count":       len(events),
+				"events":      events,
+				"next_cursor": nextCursor,
+			}, nil
 		},
 	},
 }

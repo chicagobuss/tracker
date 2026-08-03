@@ -16,7 +16,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -31,19 +33,21 @@ var migrationsFS embed.FS
 
 // Sentinel errors mapped to HTTP status codes by the handlers.
 var (
-	ErrNotFound        = errors.New("not found")
-	ErrAlreadyExists   = errors.New("already exists")
-	ErrLeaseHeld       = errors.New("lease held by another agent")
-	ErrNoLease         = errors.New("caller does not hold a valid lease")
-	ErrVersionConflict = errors.New("version conflict")
-	ErrBadTaskStatus   = errors.New("status must be 'done' or 'failed'")
-	ErrNotClaimant     = errors.New("task is not claimed by this actor")
-	ErrNotClaimable    = errors.New("task is not claimable")
-	ErrDeleted         = errors.New("document is soft-deleted; restore it first")
-	ErrConfirmMismatch = errors.New("hard-delete confirm must exactly equal the document slug")
-	ErrFolioNotEmpty   = errors.New("folio still has files; pass cascade=true or delete files first")
-	ErrNoWorkspace     = errors.New("unknown workspace; create it with create_workspace first")
-	ErrBadWorkspace    = errors.New("workspace must match [a-z0-9][a-z0-9_-]{0,62}")
+	ErrNotFound            = errors.New("not found")
+	ErrAlreadyExists       = errors.New("already exists")
+	ErrLeaseHeld           = errors.New("lease held by another agent")
+	ErrNoLease             = errors.New("caller does not hold a valid lease")
+	ErrVersionConflict     = errors.New("version conflict")
+	ErrBadTaskStatus       = errors.New("status must be 'done' or 'failed'")
+	ErrNotClaimant         = errors.New("task is not claimed by this actor")
+	ErrNotClaimable        = errors.New("task is not claimable")
+	ErrDeleted             = errors.New("document is soft-deleted; restore it first")
+	ErrConfirmMismatch     = errors.New("hard-delete confirm must exactly equal the document slug")
+	ErrFolioNotEmpty       = errors.New("folio still has files; pass cascade=true or delete files first")
+	ErrNoWorkspace         = errors.New("unknown workspace; create it with create_workspace first")
+	ErrBadWorkspace        = errors.New("workspace must match [a-z0-9][a-z0-9_-]{0,62}")
+	ErrBadCursor           = errors.New("invalid cursor format (expected '<workspace>:<kindshash>:<xact_id>:<id>')")
+	ErrCursorScopeMismatch = errors.New("cursor scope mismatch")
 )
 
 // normalizeCreateError turns Postgres's unique-index error into a stable
@@ -85,6 +89,19 @@ type Lease struct {
 	AcquiredAt time.Time `json:"acquired_at"`
 	RenewedAt  time.Time `json:"renewed_at"`
 	ExpiresAt  time.Time `json:"expires_at"`
+}
+
+type Event struct {
+	ID        int64     `json:"id"`
+	TS        time.Time `json:"ts"`
+	Workspace string    `json:"workspace"`
+	Kind      string    `json:"kind"`
+	DocID     *string   `json:"doc_id,omitempty"`
+	Slug      *string   `json:"slug,omitempty"`
+	Actor     *string   `json:"actor,omitempty"`
+	Version   *int      `json:"version,omitempty"`
+	TaskID    *string   `json:"task_id,omitempty"`
+	XactID    string    `json:"xact_id,omitempty"`
 }
 
 type BlobStore interface {
@@ -212,14 +229,17 @@ func (s *Store) Scoped(ctx context.Context, workspace string) (context.Context, 
 	if err != nil {
 		return ctx, noop, err
 	}
+	var once sync.Once
 	release := func() {
-		// Restore the connection before it returns to the pool. Every request sets
-		// both of these on acquire, so a leftover could not actually be observed —
-		// this is belt and braces for a future path that forgets. WithoutCancel so
-		// the reset still runs when the client hung up mid-request.
-		_, _ = c.Exec(context.WithoutCancel(ctx),
-			`reset role; select set_config('app.workspace', '', false)`)
-		c.Release()
+		once.Do(func() {
+			// Restore the connection before it returns to the pool. Every request sets
+			// both of these on acquire, so a leftover could not actually be observed —
+			// this is belt and braces for a future path that forgets. WithoutCancel so
+			// the reset still runs when the client hung up mid-request.
+			_, _ = c.Exec(context.WithoutCancel(ctx),
+				`reset role; select set_config('app.workspace', '', false)`)
+			c.Release()
+		})
 	}
 	// Drop to the unprivileged role before touching any data. Without this the
 	// policies are inert: tracker normally connects as the database superuser
@@ -448,15 +468,31 @@ func (s *Store) CreateDocument(ctx context.Context, slug, title, kind string, ta
 	}
 
 	if content == nil {
-		row := s.q(ctx).QueryRow(ctx, `
+		tx, err := s.q(ctx).Begin(ctx)
+		if err != nil {
+			return nil, err
+		}
+		defer tx.Rollback(ctx)
+
+		row := tx.QueryRow(ctx, `
 			insert into documents (workspace, slug, title, kind, tags, metadata, created_by, updated_by, fts)
 			values (current_setting('app.workspace'), $1, $2, $3, $4, $5::jsonb, $6, $6, to_tsvector('english', $2))
 			returning `+docSelect, slug, title, kind, tags, string(metadata), by)
 		doc, err := scanDoc(row)
-		if err == nil {
-			s.touchActor(ctx, by)
+		if err != nil {
+			return nil, normalizeCreateError(err)
 		}
-		return doc, normalizeCreateError(err)
+		if _, err := tx.Exec(ctx, `
+			insert into events (workspace, kind, doc_id, slug, actor, version)
+			values (current_setting('app.workspace'), 'doc_created', $1, $2, $3, $4)`,
+			doc.ID, doc.Slug, by, doc.Version); err != nil {
+			return nil, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, err
+		}
+		s.touchActor(ctx, by)
+		return doc, nil
 	}
 
 	// Seed initial content: blob first (content-addressed), then the row + v1 revision.
@@ -488,6 +524,12 @@ func (s *Store) CreateDocument(ctx context.Context, slug, title, kind string, ta
 	if _, err := tx.Exec(ctx, `
 		insert into document_revisions (document_id, version, content_key, content_hash, size_bytes, author)
 		values ($1, 1, $2, $3, $4, $5)`, doc.ID, key, hash, int64(len(content)), by); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `
+		insert into events (workspace, kind, doc_id, slug, actor, version)
+		values (current_setting('app.workspace'), 'doc_created', $1, $2, $3, $4)`,
+		doc.ID, doc.Slug, by, doc.Version); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -647,6 +689,12 @@ func (s *Store) PatchDocument(ctx context.Context, idOrSlug string, p DocPatch, 
 		returning `+docSelect, args...)
 	doc, err := scanDoc(row)
 	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `
+		insert into events (workspace, kind, doc_id, slug, actor, version)
+		values (current_setting('app.workspace'), 'doc_retagged', $1, $2, $3, $4)`,
+		doc.ID, doc.Slug, by, doc.Version); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -895,6 +943,12 @@ func (s *Store) WriteContent(ctx context.Context, docID, owner, leaseToken strin
 		values ($1, $2, $3, $4, $5, $6)`, id, doc.Version, key, hash, int64(len(data)), owner); err != nil {
 		return nil, err
 	}
+	if _, err := tx.Exec(ctx, `
+		insert into events (workspace, kind, doc_id, slug, actor, version)
+		values (current_setting('app.workspace'), 'doc_updated', $1, $2, $3, $4)`,
+		doc.ID, doc.Slug, owner, doc.Version); err != nil {
+		return nil, err
+	}
 	// Heartbeat the lease on a successful write.
 	_, _ = tx.Exec(ctx, `update doc_locks set renewed_at = now() where document_id = $1`, id)
 
@@ -936,8 +990,13 @@ func (s *Store) SoftDeleteDocument(ctx context.Context, idOrSlug, by string, cas
 		}
 		if cascade && n > 0 {
 			if _, err := tx.Exec(ctx, `
-				update documents set deleted_at = now(), deleted_by = $1, updated_by = $1, updated_at = now()
-				where $2 = any(tags) and deleted_at is null and id <> $3`,
+				with changed as (
+					update documents set deleted_at = now(), deleted_by = $1, updated_by = $1, updated_at = now()
+					where $2 = any(tags) and deleted_at is null and id <> $3
+					returning id, slug, version
+				)
+				insert into events (workspace, kind, doc_id, slug, actor, version)
+				select current_setting('app.workspace'), 'doc_soft_deleted', id, slug, $1, version from changed`,
 				by, folioTag(doc.Slug), doc.ID); err != nil {
 				return nil, err
 			}
@@ -961,6 +1020,12 @@ func (s *Store) SoftDeleteDocument(ctx context.Context, idOrSlug, by string, cas
 		return nil, err
 	}
 	_, _ = tx.Exec(ctx, `delete from doc_locks where document_id = $1`, doc.ID)
+	if _, err := tx.Exec(ctx, `
+		insert into events (workspace, kind, doc_id, slug, actor, version)
+		values (current_setting('app.workspace'), 'doc_soft_deleted', $1, $2, $3, $4)`,
+		out.ID, out.Slug, by, out.Version); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
@@ -970,12 +1035,27 @@ func (s *Store) SoftDeleteDocument(ctx context.Context, idOrSlug, by string, cas
 
 // RestoreDocument clears a soft-delete tombstone. No-op if the doc is live.
 func (s *Store) RestoreDocument(ctx context.Context, idOrSlug, by string) (*Document, error) {
-	row := s.q(ctx).QueryRow(ctx, `
+	tx, err := s.q(ctx).Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	row := tx.QueryRow(ctx, `
 		update documents set deleted_at = null, deleted_by = null, updated_by = $2, updated_at = now()
 		where `+idClause+`
 		returning `+docSelect, idOrSlug, by)
 	doc, err := scanDoc(row)
 	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `
+		insert into events (workspace, kind, doc_id, slug, actor, version)
+		values (current_setting('app.workspace'), 'doc_restored', $1, $2, $3, $4)`,
+		doc.ID, doc.Slug, by, doc.Version); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	s.touchActor(ctx, by)
@@ -1012,11 +1092,24 @@ func (s *Store) HardDeleteDocument(ctx context.Context, idOrSlug, confirm, by st
 			return nil, ErrFolioNotEmpty
 		}
 		if cascade && n > 0 {
-			if _, err := tx.Exec(ctx, `delete from documents where $1 = any(tags) and id <> $2`,
-				folioTag(doc.Slug), doc.ID); err != nil {
+			if _, err := tx.Exec(ctx, `
+				with changed as (
+					delete from documents
+					where $2 = any(tags) and id <> $3
+					returning id, slug, version
+				)
+				insert into events (workspace, kind, doc_id, slug, actor, version)
+				select current_setting('app.workspace'), 'doc_hard_deleted', id, slug, $1, version from changed`,
+				by, folioTag(doc.Slug), doc.ID); err != nil {
 				return nil, err
 			}
 		}
+	}
+	if _, err := tx.Exec(ctx, `
+		insert into events (workspace, kind, doc_id, slug, actor, version)
+		values (current_setting('app.workspace'), 'doc_hard_deleted', $1, $2, $3, $4)`,
+		doc.ID, doc.Slug, by, doc.Version); err != nil {
+		return nil, err
 	}
 	if _, err := tx.Exec(ctx, `delete from documents where id = $1`, doc.ID); err != nil {
 		return nil, err
@@ -1167,4 +1260,154 @@ func (s *Store) ActorActivity(ctx context.Context, name string, limit int) ([]Ac
 		out = append(out, a)
 	}
 	return out, rows.Err()
+}
+
+func normalizeKinds(raw []string) []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, item := range raw {
+		for _, k := range strings.Split(item, ",") {
+			k = strings.TrimSpace(k)
+			if k != "" && !seen[k] {
+				seen[k] = true
+				out = append(out, k)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// kindsHash produces a 64-character hex SHA-256 digest of the canonical
+// length-prefixed encoding of the normalized kind strings.
+//
+// Proof of injectivity:
+//  1. Length-prefixed encoding: Each element `k` in the normalized slice is
+//     serialized as `fmt.Sprintf("%d:%s;", len(k), k)`. Because the byte length
+//     is declared before reading `len(k)` bytes, no character inside `k` (including
+//     newlines, colons, semicolons, or null bytes) can alter element boundaries.
+//     Therefore, distinct normalized string slices map to distinct byte sequences.
+//  2. Cryptographic digest: SHA-256 maps canonical byte sequences to a 256-bit
+//     digest. Because SHA-256 is computationally collision-resistant, distinct
+//     canonical byte sequences yield distinct 64-hex digests.
+//  3. Empty sentinel: The empty set `[]` serializes to 0 bytes (`""`), producing
+//     sha256("") = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".
+//     Any non-empty set serializes to >= 3 bytes (`1:x;`), producing a distinct digest.
+func kindsHash(kinds []string) string {
+	var buf bytes.Buffer
+	for _, k := range kinds {
+		fmt.Fprintf(&buf, "%d:%s;", len(k), k)
+	}
+	h := sha256.Sum256(buf.Bytes())
+	return hex.EncodeToString(h[:])
+}
+
+type ParsedCursor struct {
+	Workspace string
+	KindsHash string
+	XactID    uint64
+	ID        int64
+}
+
+func parseCursor(since string) (ParsedCursor, error) {
+	if since == "" {
+		return ParsedCursor{}, nil
+	}
+	parts := strings.Split(since, ":")
+	if len(parts) != 4 {
+		return ParsedCursor{}, ErrBadCursor
+	}
+	ws := parts[0]
+	hash := parts[1]
+	xactID, err1 := strconv.ParseUint(parts[2], 10, 64)
+	id, err2 := strconv.ParseInt(parts[3], 10, 64)
+	if err1 != nil || err2 != nil || id < 0 || ws == "" || len(hash) != 64 {
+		return ParsedCursor{}, ErrBadCursor
+	}
+	return ParsedCursor{
+		Workspace: ws,
+		KindsHash: hash,
+		XactID:    xactID,
+		ID:        id,
+	}, nil
+}
+
+func eventCursor(e Event, kinds []string) string {
+	ws := e.Workspace
+	if ws == "" {
+		ws = "default"
+	}
+	return fmt.Sprintf("%s:%s:%s:%d", ws, kindsHash(normalizeKinds(kinds)), e.XactID, e.ID)
+}
+
+// ListEvents retrieves change events starting after the cursor `since`.
+func (s *Store) ListEvents(ctx context.Context, since string, kinds []string, limit int) ([]Event, string, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+
+	reqWS := requestWorkspace(ctx).name
+	if reqWS == "" {
+		_ = s.q(ctx).QueryRow(ctx, `select current_setting('app.workspace', true)`).Scan(&reqWS)
+	}
+	if reqWS == "" {
+		reqWS = "default"
+	}
+	normKinds := normalizeKinds(kinds)
+	reqHash := kindsHash(normKinds)
+
+	parsed, err := parseCursor(since)
+	if err != nil {
+		return nil, since, err
+	}
+
+	if since != "" {
+		if parsed.Workspace != reqWS || parsed.KindsHash != reqHash {
+			return nil, since, fmt.Errorf("%w: cursor scope (%s, %s) does not match request scope (%s, %s)",
+				ErrCursorScopeMismatch, parsed.Workspace, parsed.KindsHash, reqWS, reqHash)
+		}
+	}
+
+	query := `select id, ts, workspace, kind, doc_id::text, slug, actor, version, task_id, xact_id::text
+		from events
+		where (xact_id, id) > ($1::xid8, $2)
+		  and xact_id < pg_snapshot_xmin(pg_current_snapshot())`
+	args := []any{parsed.XactID, parsed.ID}
+
+	if len(normKinds) > 0 {
+		query += ` and kind = any($3)`
+		args = append(args, normKinds)
+		query += ` order by xact_id asc, id asc limit $4`
+		args = append(args, limit)
+	} else {
+		query += ` order by xact_id asc, id asc limit $3`
+		args = append(args, limit)
+	}
+
+	rows, err := s.q(ctx).Query(ctx, query, args...)
+	if err != nil {
+		return nil, since, err
+	}
+	defer rows.Close()
+
+	events := []Event{}
+	nextCursor := since
+	if nextCursor == "" {
+		nextCursor = fmt.Sprintf("%s:%s:0:0", reqWS, reqHash)
+	}
+	for rows.Next() {
+		var e Event
+		if err := rows.Scan(&e.ID, &e.TS, &e.Workspace, &e.Kind, &e.DocID, &e.Slug, &e.Actor, &e.Version, &e.TaskID, &e.XactID); err != nil {
+			return nil, since, err
+		}
+		events = append(events, e)
+		nextCursor = fmt.Sprintf("%s:%s:%s:%d", reqWS, reqHash, e.XactID, e.ID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, since, err
+	}
+	return events, nextCursor, nil
 }

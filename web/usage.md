@@ -36,6 +36,8 @@ handles the whole lease + version dance for you. Mutating tools require the
 - `GET /folios/{slug}/files/{filename}` (`/raw` for bytes)
 - `GET /tasks?status=&limit=&offset=` · `GET /tasks/{id}` — the shared work queue
 - `GET /actors` — entities that have acted, and when
+- `GET /changes?since=&kind=&limit=100` · `GET /changes/stream` — change feed & SSE stream
+  (omit `since` on the first call; then pass back the opaque `next_cursor`)
 
 ### List shape — `view` (token-efficient by default)
 
@@ -54,35 +56,37 @@ nothing returns a `hint`.
 
 `PATCH /docs/{id}` with `X-Actor` and a body of `{add_tags, remove_tags, tags,
 metadata, title}` changes labels **without** a lease, content rewrite, or version
-bump — tags/metadata are labels, not content. Tag convention: namespace your
-tags — `folio:<slug>`, `topic:<x>`, `kind:<x>`, `status:<x>`, `agent:<x>`.
+### Write API
 
-## Write (every write needs an `X-Actor: <you>` header)
+`POST /docs` (`{slug, title, kind, tags, metadata, content, content_type}`) creates;
+`PATCH /docs/{id}` (`{title, kind, tags, metadata, content, content_type}`) updates;
+`DELETE /docs/{id}` soft-deletes (restore with `POST /docs/{id}/restore`);
+`DELETE /docs/{id}?confirm={slug}` hard-deletes.
 
-1. `POST /docs/{id}/lock` → returns a `lease_token`
-2. `PUT /docs/{id}` with headers `X-Actor`, `X-Lease-Token`, `If-Match: <version>`
-3. `DELETE /docs/{id}/lock`
+All writes append a row to `events` with a monotonic sequence `id`.
 
-Conflicts: `409` lease held by another, `423` you don't hold the lease, `412`
-the version moved under you. Create docs with `POST /docs`; folios with
-`POST /folios` and `POST /folios/{slug}/files`.
+## Folios
 
-## Delete
+A folio is a named collection of documents (`folio:{slug}` in `tags`).
+Use `POST /folios` (`{slug, title, description}`) to create, `GET /folios` to list.
+Add files with `POST /folios/{slug}/files` (`{filename, title, content}`).
+Soft-deleting a folio soft-deletes its files; hard-deleting with `cascade=true` hard-deletes them.
 
-- **Soft-delete** (prefer): `POST /docs/{id}/soft-delete` — hides from default
-  search; history kept; restore with `POST /docs/{id}/restore`. Folios with
-  files need `{"cascade":true}`.
-- **Hard-delete** (irreversible): `DELETE /docs/{id}` with
-  `{"confirm":"<exact-slug>"}` (or `X-Confirm-Slug` / `?confirm=`). MCP tool
-  `hard_delete_doc` requires the same `confirm` argument.
+## Work Queue
 
-## Tasks (shared work queue)
-
-`POST /tasks` enqueues; `POST /tasks/claim` atomically claims the next
-claimable task (claims expire after `TASK_CLAIM_TTL`, default 1h — a crashed
-agent's task becomes re-claimable, `attempts` counts claims); `POST
-/tasks/{id}/complete` (`{status: done|failed, result}`) must come from the
+Tasks have status `open` → `claimed` → `done` or `failed`.
+Enqueue with `POST /tasks` (`{task_type, payload, run_after}`);
+claim with `POST /tasks/claim` (`{actor, task_types, lease_duration_sec}`).
+State transitions emit events (`task_enqueued`, `task_claimed`, `task_completed`, `task_failed`).
+Updates to `/tasks/{id}/complete` (`{status: done|failed, result}`) must come from the
 current claimant.
+
+## Changes
+
+- `GET /changes?since=&kind=&limit=100` — sequential change feed (`{count, events, next_cursor}`)
+- `GET /changes/stream?since=&kind=` — Server-Sent Events (`text/event-stream`) stream of changes
+
+Events are ordered deterministically by a composite opaque cursor (`workspace:kindshash:xact_id:id`). Pass `since=<cursor>` (the opaque string returned in `next_cursor` or in the SSE `id:` field) to resume after a given event. A cursor is strictly bound to the scope (`workspace` and `kind` filters) that produced it — passing a cursor across a changed workspace or `kind` filter returns HTTP 400. Note: the unsigned cursor is a resumption hint rather than a capability (database RLS strictly enforces row visibility). On empty results, `next_cursor` preserves the current scope and watermark. MCP tool `list_changes` mirrors `GET /changes`.
 
 ## Conventions
 
