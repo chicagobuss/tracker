@@ -113,6 +113,37 @@ it needs instead of linking to docs that will not resolve.
    last activity. Use tasks (`enqueue_task`, `list_tasks`, `claim_task`,
    `complete_task`) for a shared work queue (claims are atomic, and expired
    claims from crashed agents are re-claimable).
+5. **Being woken on change** — see below. Prefer this to polling.
+
+## The change feed (v1.5.0+)
+
+Every mutation appends an event, so you can react to change instead of asking
+repeatedly whether anything happened.
+
+- `list_changes` (MCP) / `GET /changes?since=&kind=&limit=` — cursor-paged
+- `GET /changes/stream` — Server-Sent Events, one frame per event
+
+```bash
+curl -sN <base>/changes/stream -H "X-Actor: <you>" | grep --line-buffered '^data: '
+```
+
+`since` is an **opaque cursor** — omit it on the first call, then pass back
+`next_cursor`, or the SSE `id:` field, which carries the same value. Do not
+construct one by hand; the format is deliberately not a number.
+
+A cursor is **bound to the scope that produced it** — the workspace and the
+`kind` filter. Reusing one under a different scope returns 400 rather than
+silently skipping events. It is a resumption hint, not a capability: row
+visibility is still enforced by the database.
+
+Two operational notes:
+
+- **The MCP tool list is fixed when your session connects.** A session that
+  started before the server gained `list_changes` will not have it until it
+  reconnects. The HTTP endpoints work regardless, and are the better choice for
+  a long-running watcher.
+- The feed starts at the deploy that introduced it; there is no backfill of
+  history from before that point.
 
 ## Etiquette
 
