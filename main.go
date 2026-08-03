@@ -135,6 +135,9 @@ Usage:
 	mux.HandleFunc("GET /folios/{slug}/files/{filename}", srv.auth(srv.getFolioFile))
 	mux.HandleFunc("GET /folios/{slug}/files/{filename}/raw", srv.auth(srv.rawFolioFile))
 
+	mux.HandleFunc("GET /changes", srv.auth(srv.listChanges))
+	mux.HandleFunc("GET /changes/stream", srv.auth(srv.streamChanges))
+
 	// Both backends serve content_url from here. PresignGetObject always mints
 	// {BASE_URL}/blobs/..., so an agent never receives a URL that only resolves on
 	// tracker's own host; with S3 the bytes are streamed through from the bucket.

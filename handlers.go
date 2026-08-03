@@ -65,6 +65,10 @@ func writeErr(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "unknown_workspace", err.Error(), nil)
 	case errors.Is(err, ErrBadWorkspace):
 		writeError(w, http.StatusBadRequest, "bad_workspace", err.Error(), nil)
+	case errors.Is(err, ErrBadCursor):
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error(), nil)
+	case errors.Is(err, ErrCursorScopeMismatch):
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error(), nil)
 	default:
 		writeError(w, http.StatusInternalServerError, "internal", err.Error(), nil)
 	}
@@ -120,8 +124,17 @@ func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
 		defer release()
 
 		ctx = context.WithValue(ctx, reqWSKey{}, reqWS{name: ws, confined: confined})
+		ctx = context.WithValue(ctx, reqReleaseKey{}, release)
 		w.Header().Set("X-Workspace", ws)
 		h(w, r.WithContext(ctx))
+	}
+}
+
+type reqReleaseKey struct{}
+
+func releaseAuthConn(ctx context.Context) {
+	if rel, ok := ctx.Value(reqReleaseKey{}).(func()); ok && rel != nil {
+		rel()
 	}
 }
 
@@ -1026,4 +1039,203 @@ func (s *Server) actorActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"activity": items, "count": len(items)})
+}
+
+// --- changes ---
+
+func (s *Server) changesContext(r *http.Request) (context.Context, func(), error) {
+	ctx := r.Context()
+	ws := strings.TrimSpace(r.URL.Query().Get("workspace"))
+	if ws == "" || ws == requestWorkspace(ctx).name {
+		return ctx, func() {}, nil
+	}
+	return s.scopeOverride(ctx, ws)
+}
+
+func writeChangesScopeError(w http.ResponseWriter, err error) {
+	if errors.Is(err, ErrBadWorkspace) || errors.Is(err, ErrNoWorkspace) {
+		writeErr(w, err)
+		return
+	}
+	writeError(w, http.StatusForbidden, "workspace_forbidden", err.Error(), nil)
+}
+
+func (s *Server) listChanges(w http.ResponseWriter, r *http.Request) {
+	ctx, release, err := s.changesContext(r)
+	if err != nil {
+		writeChangesScopeError(w, err)
+		return
+	}
+	defer release()
+
+	since := strings.TrimSpace(r.URL.Query().Get("since"))
+	limit := 100
+	if str := r.URL.Query().Get("limit"); str != "" {
+		if n, err := strconv.Atoi(str); err == nil && n > 0 {
+			limit = n
+		}
+	}
+
+	kinds := normalizeKinds(r.URL.Query()["kind"])
+
+	events, nextCursor, err := s.store.ListEvents(ctx, since, kinds, limit)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if events == nil {
+		events = []Event{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count":       len(events),
+		"events":      events,
+		"next_cursor": nextCursor,
+	})
+}
+
+func (s *Server) streamChanges(w http.ResponseWriter, r *http.Request) {
+	releaseAuthConn(r.Context())
+
+	reqWS := requestWorkspace(r.Context()).name
+	if reqWS == "" {
+		reqWS = "default"
+	}
+	overrideWS := strings.TrimSpace(r.URL.Query().Get("workspace"))
+
+	useOverride := overrideWS != "" && overrideWS != reqWS
+	targetWS := reqWS
+	if useOverride {
+		targetWS = overrideWS
+	}
+
+	// Validate workspace override BEFORE writing any headers
+	if useOverride {
+		_, releasePoll, err := s.scopeOverride(r.Context(), targetWS)
+		if err != nil {
+			writeChangesScopeError(w, err)
+			return
+		}
+		releasePoll()
+	}
+
+	kinds := normalizeKinds(r.URL.Query()["kind"])
+	reqHash := kindsHash(kinds)
+
+	since := strings.TrimSpace(r.URL.Query().Get("since"))
+	if since == "" {
+		since = strings.TrimSpace(r.Header.Get("Last-Event-ID"))
+	}
+	if since != "" {
+		parsed, err := parseCursor(since)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		if parsed.Workspace != targetWS || parsed.KindsHash != reqHash {
+			writeErr(w, fmt.Errorf("%w: cursor scope (%s, %s) does not match request scope (%s, %s)",
+				ErrCursorScopeMismatch, parsed.Workspace, parsed.KindsHash, targetWS, reqHash))
+			return
+		}
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "internal", "streaming unsupported", nil)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	rc := http.NewResponseController(w)
+
+	sendErrorFrame := func(errMsg string) {
+		_ = rc.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		payload, _ := json.Marshal(map[string]string{"error": errMsg})
+		_, _ = fmt.Fprintf(w, "event: error\ndata: %s\n\n", payload)
+		flusher.Flush()
+	}
+
+	// Internal 1s poll inside the SSE handler. Not LISTEN/NOTIFY. Simpler, no connection-pool interaction.
+	// LISTEN/NOTIFY can be used here in the future as an optimization seam.
+	pollTicker := time.NewTicker(1 * time.Second)
+	defer pollTicker.Stop()
+
+	pingTicker := time.NewTicker(25 * time.Second)
+	defer pingTicker.Stop()
+
+	consecutiveFailures := 0
+
+	fetchAndSend := func() bool {
+		var pollCtx context.Context
+		var releasePoll func() = func() {}
+		var err error
+
+		if useOverride {
+			pollCtx, releasePoll, err = s.scopeOverride(r.Context(), targetWS)
+		} else {
+			pollCtx, releasePoll, err = s.store.Scoped(r.Context(), targetWS)
+		}
+		if err != nil {
+			consecutiveFailures++
+			if consecutiveFailures >= 3 {
+				sendErrorFrame(err.Error())
+				return false
+			}
+			return true
+		}
+		events, nextCursor, err := s.store.ListEvents(pollCtx, since, kinds, 100)
+		releasePoll()
+		if err != nil {
+			consecutiveFailures++
+			if consecutiveFailures >= 3 {
+				sendErrorFrame(err.Error())
+				return false
+			}
+			return true
+		}
+
+		consecutiveFailures = 0
+		if len(events) == 0 {
+			return true
+		}
+		for _, ev := range events {
+			b, err := json.Marshal(ev)
+			if err != nil {
+				continue
+			}
+			evCursor := eventCursor(ev, kinds)
+			_ = rc.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if _, err := fmt.Fprintf(w, "id: %s\ndata: %s\n\n", evCursor, b); err != nil {
+				return false
+			}
+			flusher.Flush()
+		}
+		since = nextCursor
+		return true
+	}
+
+	if !fetchAndSend() {
+		return
+	}
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-pollTicker.C:
+			if !fetchAndSend() {
+				return
+			}
+		case <-pingTicker.C:
+			_ = rc.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if _, err := fmt.Fprint(w, ": ping\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
 }
