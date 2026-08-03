@@ -55,6 +55,14 @@ components:
       required: true
       schema: { type: string }
       description: The entity performing this action.
+    WorkspaceQuery:
+      name: workspace
+      in: query
+      required: false
+      schema: { type: string, pattern: '^[a-z0-9][a-z0-9_-]{0,62}$' }
+      description: >
+        Read a different workspace for this call only, overriding X-Workspace.
+        Rejected with 403 when the bearer token is confined to a workspace.
     Workspace:
       name: X-Workspace
       in: header
@@ -124,6 +132,20 @@ components:
         description: { type: string }
         created_by: { type: string }
         created_at: { type: string, format: date-time }
+    Event:
+      type: object
+      description: One change-feed entry. Which optional fields are set depends on kind.
+      properties:
+        id: { type: integer, format: int64 }
+        ts: { type: string, format: date-time }
+        workspace: { type: string }
+        kind: { type: string, enum: [doc_created, doc_updated, doc_retagged, doc_soft_deleted, doc_restored, doc_hard_deleted, task_enqueued, task_claimed, task_completed] }
+        doc_id: { type: string, format: uuid }
+        slug: { type: string }
+        actor: { type: string }
+        version: { type: integer }
+        task_id: { type: string }
+        xact_id: { type: string, description: "Transaction id; events become visible only once older transactions settle, so ids are never skipped." }
     Error:
       type: object
       properties:
@@ -131,7 +153,7 @@ components:
           type: object
           required: [code, message]
           properties:
-            code: { type: string, description: "machine code: not_found, lease_held, no_lease, version_conflict, deleted, confirm_required, confirm_mismatch, folio_not_empty, bad_request, actor_required, unauthorized, internal" }
+            code: { type: string, description: "machine code: not_found, lease_held, no_lease, version_conflict, deleted, confirm_required, confirm_mismatch, folio_not_empty, bad_request, actor_required, unauthorized, workspace_forbidden, internal" }
             message: { type: string }
           additionalProperties: true
   responses:
@@ -497,6 +519,73 @@ paths:
         "200": { description: updated, content: { application/json: { schema: { type: object, properties: { task: { $ref: '#/components/schemas/Task' } } } } } }
         "400": { $ref: '#/components/responses/BadRequest' }
         "409": { description: "not_claimant — task is not claimed, or claimed by another actor", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+
+  /changes:
+    get:
+      summary: Read the change feed
+      description: >
+        Sequential feed of document and task mutations in the caller's
+        workspace. Resume with `since=<cursor>`, passing the `next_cursor` of
+        the previous page (or the SSE `id:` field) — **the parameter is `since`,
+        not `cursor`/`after`, and an unrecognized name is ignored, which silently
+        replays the feed from the beginning.** A cursor is bound to the scope
+        that produced it: reusing one under a different workspace or `kind`
+        filter is rejected rather than silently re-scoped. The cursor is a
+        resumption hint, not a capability — row visibility is enforced by
+        database row-level security.
+      parameters:
+        - { $ref: '#/components/parameters/Workspace' }
+        - { $ref: '#/components/parameters/WorkspaceQuery' }
+        - name: since
+          in: query
+          schema: { type: string }
+          description: "Opaque cursor to resume after: '<workspace>:<kindshash>:<xact_id>:<id>'."
+        - name: kind
+          in: query
+          description: Filter by event kind; repeat the parameter to pass several.
+          schema:
+            type: array
+            items: { type: string, enum: [doc_created, doc_updated, doc_retagged, doc_soft_deleted, doc_restored, doc_hard_deleted, task_enqueued, task_claimed, task_completed] }
+        - { name: limit, in: query, schema: { type: integer, default: 100, maximum: 1000 } }
+      responses:
+        "200":
+          description: events
+          content: { application/json: { schema: { type: object, properties: { events: { type: array, items: { $ref: '#/components/schemas/Event' } }, count: { type: integer }, next_cursor: { type: string, description: "Pass as `since` to read the next page; preserved across empty results." } } } } }
+        "400": { $ref: '#/components/responses/BadRequest' }
+        "403": { description: "workspace_forbidden — the bearer token is confined to another workspace", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        "404": { description: "unknown workspace", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+
+  /changes/stream:
+    get:
+      summary: Stream the change feed (Server-Sent Events)
+      description: >
+        `text/event-stream` of the same events as `GET /changes`. Each message
+        carries the event JSON in `data:` and its cursor in `id:`. Resume with
+        `since=<cursor>` or the standard `Last-Event-ID` header; the same
+        caveats apply as for `GET /changes`, so a misspelled resume parameter
+        streams the whole feed from the start.
+      parameters:
+        - { $ref: '#/components/parameters/Workspace' }
+        - { $ref: '#/components/parameters/WorkspaceQuery' }
+        - { name: since, in: query, schema: { type: string }, description: "Cursor to resume after; the Last-Event-ID header does the same and is used when this is absent." }
+        - name: Last-Event-ID
+          in: header
+          required: false
+          schema: { type: string }
+          description: Standard SSE resumption header, honoured when `since` is not given.
+        - name: kind
+          in: query
+          description: Filter by event kind; repeat the parameter to pass several.
+          schema:
+            type: array
+            items: { type: string, enum: [doc_created, doc_updated, doc_retagged, doc_soft_deleted, doc_restored, doc_hard_deleted, task_enqueued, task_claimed, task_completed] }
+      responses:
+        "200":
+          description: an event stream
+          content: { text/event-stream: { schema: { type: string } } }
+        "400": { $ref: '#/components/responses/BadRequest' }
+        "403": { description: "workspace_forbidden — the bearer token is confined to another workspace", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        "404": { description: "unknown workspace", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
 
   /workspaces:
     get:
