@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
-# Produce a self-contained tracker backup: Postgres dump + content blobs +
-# manifest, as one tar.gz. Optionally upload it to R2/S3 (BACKUP_S3_* env).
+# Produce a tracker backup: a small per-run snapshot (Postgres dump + the list
+# of content keys it references) plus a shared, append-only blob pool.
 #
 #   scripts/backup.sh                 # -> ./backups/tracker-backup-<ts>.tar.gz
 #   scripts/backup.sh --upload        # also push to BACKUP_S3_* (R2/S3)
 #
-# Restore with scripts/restore.sh.
+# Blobs are immutable and named by their own sha256, so a blob already in the
+# pool can never need re-fetching. That is what makes a run cost O(new blobs)
+# rather than O(all blobs), and stores each blob once instead of BACKUP_KEEP
+# times. The snapshot names the keys it needs; the pool holds the bytes.
+#
+# Restore with scripts/restore.sh, which reads keys.txt and pulls exactly those
+# blobs from the pool. Snapshots written before this change embed a blobs/
+# directory instead; restore.sh still handles those.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 set -a; . ./.env; set +a
@@ -17,6 +24,8 @@ command -v uv >/dev/null 2>&1 || { echo "uv not found in PATH" >&2; exit 1; }
 
 PG_CONTAINER=${PG_CONTAINER:-tracker-postgres}
 OUT_DIR=${BACKUP_DIR:-./backups}
+# Shared across all snapshots; never pruned by retention (see scripts/gc-pool.sh).
+POOL=${BACKUP_POOL_DIR:-$OUT_DIR/pool}
 TS=$(date +%Y%m%d-%H%M%S)
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -55,27 +64,54 @@ fi
 
 # 1) Postgres dump FIRST (so every content_key it references already has a blob,
 #    since writes are blob-first). Custom format for flexible pg_restore.
-echo "1/4  pg_dump ($PGDATABASE)"
+echo "1/5  pg_dump ($PGDATABASE)"
 docker exec "$PG_CONTAINER" pg_dump -U "$PGUSER" -d "$PGDATABASE" -Fc > "$WORK/db.dump"
 
-# 2) Then the blobs (immutable + content-addressed, so copying after the dump is
-#    guaranteed to include everything the dump references).
-echo "2/4  copying blobs"
-mkdir -p "$WORK/blobs"
+# 2) Sync new blobs into the shared pool. Runs AFTER the dump: writes are
+#    blob-first, so every content_key the dump references already exists in the
+#    store by the time the dump was taken. Syncing after can only add extra
+#    blobs, never miss a referenced one.
+echo "2/5  sync blob pool"
+mkdir -p "$POOL"
 if [ "${STORAGE_TYPE:-file}" = "file" ]; then
-  if [ -d "${BLOB_DIR:-./data/blobs}" ]; then
-    cp -a "${BLOB_DIR:-./data/blobs}/." "$WORK/blobs/"
+  SRC_DIR="${BLOB_DIR:-./data/blobs}"
+  if [ -d "$SRC_DIR" ]; then
+    # -u copies only what the pool lacks or what is newer; blobs are immutable,
+    # so in practice this is "only the new ones".
+    cp -au "$SRC_DIR/." "$POOL/"
   fi
 else
-  uv run --quiet scripts/s3util.py download-blobs "$WORK/blobs"
+  uv run --quiet scripts/s3util.py sync-pool "$POOL"
+fi
+
+# 3) The keys this snapshot needs, straight from the restored-to database. Both
+#    live docs and revisions, since history must restore too.
+echo "3/5  keys manifest"
+docker exec "$PG_CONTAINER" psql -U "$PGUSER" -d "$PGDATABASE" -tA -c \
+  "select distinct content_key from (
+     select content_key from documents where content_key is not null and content_key <> ''
+     union all
+     select content_key from document_revisions where content_key is not null and content_key <> ''
+   ) k order by 1" > "$WORK/keys.txt"
+
+# A snapshot whose blobs are not all in the pool is not a backup. Fail loudly
+# now rather than at restore time.
+if [ "${STORAGE_TYPE:-file}" = "file" ]; then
+  MISSING=0
+  while IFS= read -r k; do [ -n "$k" ] && [ ! -f "$POOL/$k" ] && MISSING=$((MISSING+1)); done < "$WORK/keys.txt"
+  [ "$MISSING" -eq 0 ] || { echo "pool is missing $MISSING referenced blobs — aborting" >&2; exit 1; }
+  echo "     $(wc -l < "$WORK/keys.txt" | tr -d ' ') keys, all present in pool"
+else
+  uv run --quiet scripts/s3util.py verify-pool "$POOL" "$WORK/keys.txt"
 fi
 
 # 3) Manifest for sanity-checking a restore. binary_version is the version the
 #    LIVE service reports (the binary that produced this data); fall back to the
 #    repo's git version if the service isn't reachable.
-echo "3/4  manifest"
+echo "4/5  manifest"
 DOCS=$(docker exec "$PG_CONTAINER" psql -U "$PGUSER" -d "$PGDATABASE" -tA -c "select count(*) from documents")
-BLOBS=$(find "$WORK/blobs" -type f | wc -l | tr -d ' ')
+BLOBS=$(wc -l < "$WORK/keys.txt" | tr -d ' ')
+POOL_N=$(find "$POOL" -type f | wc -l | tr -d ' ')
 HOST_ADDR=$(echo "$LISTEN_ADDR" | cut -d, -f1)
 BINVER=$(curl -s --max-time 3 "http://$HOST_ADDR/version" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p')
 [ -n "$BINVER" ] || BINVER=$(git describe --tags --always --dirty 2>/dev/null || echo unknown)
@@ -86,6 +122,8 @@ cat > "$WORK/manifest.json" <<EOF
   "git_commit": "$(git rev-parse --short HEAD 2>/dev/null || echo unknown)",
   "documents": $DOCS,
   "blobs": $BLOBS,
+  "pool_blobs": $POOL_N,
+  "format": "pool-v2",
   "pg_dump_format": "custom",
   "storage_type": "${STORAGE_TYPE:-file}",
   "content_bucket": "${S3_BUCKET:-local}"
@@ -93,10 +131,10 @@ cat > "$WORK/manifest.json" <<EOF
 EOF
 
 # 4) Bundle.
-echo "4/4  tar"
+echo "5/5  tar"
 TAR="$OUT_DIR/tracker-backup-$TS.tar.gz"
-tar czf "$TAR" -C "$WORK" db.dump blobs manifest.json
-echo "backup ready: $TAR ($(du -h "$TAR" | cut -f1)) — $DOCS docs, $BLOBS blobs"
+tar czf "$TAR" -C "$WORK" db.dump keys.txt manifest.json
+echo "backup ready: $TAR ($(du -h "$TAR" | cut -f1)) — $DOCS docs, $BLOBS keys; pool $POOL_N blobs ($(du -sh "$POOL" | cut -f1))"
 
 if [ "$UPLOAD" = 1 ]; then
   echo "uploading to backup store..."
