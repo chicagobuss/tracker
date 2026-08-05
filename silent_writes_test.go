@@ -5,10 +5,14 @@ import (
 	"testing"
 )
 
-// Each test here fails against the behaviour it replaces. Verified by reverting
-// the fix and re-running: without DisallowUnknownFields the PATCH case returns
-// 200, without the query fallback workspaceSelector returns "", and without
-// cutRevisionRaw a revision path is swallowed by the plain "/raw" suffix.
+// Unit coverage for the two pure helpers only. Each fails against the behaviour
+// it replaces, verified by reverting the fix on a copied tree: without the query
+// fallback workspaceSelector returns "", and without cutRevisionRaw a revision
+// path is swallowed by the plain "/raw" suffix.
+//
+// The PATCH change and the end-to-end routing are covered by DB-backed handler
+// tests in silent_writes_db_test.go, not here. An earlier version of this
+// comment claimed the PATCH regression was covered when no PATCH test existed.
 
 func TestWorkspaceSelector(t *testing.T) {
 	for _, tc := range []struct {

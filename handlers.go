@@ -475,6 +475,13 @@ func (s *Server) patchDoc(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, "json body required (tags / add_tags / remove_tags / metadata / title / kind): "+err.Error())
 		return
 	}
+	// A decoder reads one JSON value and stops, so `{"add_tags":[..]} {"content":..}`
+	// would otherwise apply the tags, discard the content and answer 200 — the
+	// very no-op this endpoint is being made to refuse.
+	if err := dec.Decode(new(json.RawMessage)); err != io.EOF {
+		badRequest(w, "body must be a single JSON object")
+		return
+	}
 	doc, err := s.store.PatchDocument(r.Context(), docID(r), DocPatch{
 		Tags: in.Tags, AddTags: in.AddTags, RemoveTags: in.RemoveTags,
 		Metadata: in.Metadata, Title: in.Title, Kind: in.Kind,

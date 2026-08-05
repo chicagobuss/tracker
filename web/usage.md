@@ -59,7 +59,9 @@ metadata, title}` changes labels **without** a lease, content rewrite, or versio
 ### Write API
 
 `POST /docs` (`{slug, title, kind, tags, metadata, content, content_type}`) creates;
-`PATCH /docs/{id}` (`{title, kind, tags, metadata, content, content_type}`) updates;
+`PATCH /docs/{id}` (`{title, kind, tags, metadata}`) relabels — it does **not**
+write content, and a body carrying `content` is refused with 400; use
+`PUT /docs/{id}` with `If-Match` and a lease for that;
 `DELETE /docs/{id}` soft-deletes (restore with `POST /docs/{id}/restore`);
 `DELETE /docs/{id}?confirm={slug}` hard-deletes.
 

@@ -288,8 +288,10 @@ paths:
                 metadata: { type: object, description: "shallow-merged into existing metadata" }
                 title: { type: string }
                 kind: { type: string }
+              additionalProperties: false
       responses:
         "200": { description: relabelled, content: { application/json: { schema: { type: object, properties: { document: { $ref: '#/components/schemas/Document' } } } } } }
+        "400": { description: "unknown field (e.g. content — use PUT), or more than one JSON value in the body" }
         "404": { $ref: '#/components/responses/NotFound' }
     delete:
       summary: Hard-delete a document (irreversible)
