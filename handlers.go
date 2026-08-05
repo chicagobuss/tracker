@@ -97,11 +97,11 @@ func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
 			// ":workspace" suffix) leave the choice to the caller.
 			if bound != "" {
 				ws, confined = bound, true
-			} else if hdr := r.Header.Get("X-Workspace"); hdr != "" {
-				ws = hdr
+			} else if sel := workspaceSelector(r); sel != "" {
+				ws = sel
 			}
-		} else if hdr := r.Header.Get("X-Workspace"); hdr != "" {
-			ws = hdr
+		} else if sel := workspaceSelector(r); sel != "" {
+			ws = sel
 		}
 		if !validWorkspace(ws) {
 			writeError(w, http.StatusBadRequest, "bad_workspace", ErrBadWorkspace.Error(),
@@ -147,6 +147,19 @@ type reqWS struct {
 }
 
 type reqWSKey struct{}
+
+// workspaceSelector reads the caller's requested workspace. The X-Workspace
+// header wins; ?workspace= is honoured as a fallback because the MCP tools take
+// a per-call `workspace` argument and the /fleet routes already read the query
+// param, so a reader that passed ?workspace= silently got the default workspace
+// back with a 200 — a wrong answer that looked like a right one. Neither form
+// can widen a confined token; that check stays above.
+func workspaceSelector(r *http.Request) string {
+	if hdr := strings.TrimSpace(r.Header.Get("X-Workspace")); hdr != "" {
+		return hdr
+	}
+	return strings.TrimSpace(r.URL.Query().Get("workspace"))
+}
 
 func requestWorkspace(ctx context.Context) reqWS {
 	v, _ := ctx.Value(reqWSKey{}).(reqWS)
@@ -399,6 +412,17 @@ func (s *Server) getDoc(w http.ResponseWriter, r *http.Request) {
 		// matches, ".../raw" streams the prefix's bytes and ".../lock" reports
 		// its lease — so folio-file slugs get the same sub-routes as {id}.
 		if rest := r.PathValue("rest"); rest != "" {
+			// Order matters: ".../revisions/{n}/raw" also ends in "/raw", so it
+			// has to be tested before the plain-content case or a revision read
+			// would stream the current bytes instead.
+			if base, version, ok := cutRevisionRaw(rest); ok {
+				s.rawRevisionID(w, r, base, version)
+				return
+			}
+			if base, ok := strings.CutSuffix(rest, "/revisions"); ok {
+				s.listRevisionsID(w, r, base)
+				return
+			}
 			if base, ok := strings.CutSuffix(rest, "/raw"); ok {
 				s.streamContent(w, r, base)
 				return
@@ -435,8 +459,27 @@ func (s *Server) patchDoc(w http.ResponseWriter, r *http.Request) {
 		Title      *string         `json:"title"`
 		Kind       *string         `json:"kind"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		badRequest(w, "json body required (tags / add_tags / remove_tags / metadata / title / kind)")
+	// Strict, so a field this endpoint cannot apply is refused rather than
+	// dropped. PATCH used to accept {"content": ...}, return 200, echo back a
+	// content_url and content_hash for the *old* bytes, and change nothing —
+	// indistinguishable from a successful write unless the caller re-read the
+	// document. Content is written by PUT, which takes a lease and If-Match.
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&in); err != nil {
+		if strings.Contains(err.Error(), "unknown field \"content\"") {
+			badRequest(w, "PATCH does not write content — use PUT /docs/{id} with If-Match "+
+				"and a lease. PATCH takes tags / add_tags / remove_tags / metadata / title / kind.")
+			return
+		}
+		badRequest(w, "json body required (tags / add_tags / remove_tags / metadata / title / kind): "+err.Error())
+		return
+	}
+	// A decoder reads one JSON value and stops, so `{"add_tags":[..]} {"content":..}`
+	// would otherwise apply the tags, discard the content and answer 200 — the
+	// very no-op this endpoint is being made to refuse.
+	if err := dec.Decode(new(json.RawMessage)); err != io.EOF {
+		badRequest(w, "body must be a single JSON object")
 		return
 	}
 	doc, err := s.store.PatchDocument(r.Context(), docID(r), DocPatch{
@@ -523,12 +566,36 @@ func (s *Server) streamContent(w http.ResponseWriter, r *http.Request, idOrSlug 
 
 // listRevisions returns a document's version history (newest first).
 func (s *Server) listRevisions(w http.ResponseWriter, r *http.Request) {
-	revs, err := s.store.DocRevisions(r.Context(), docID(r))
+	s.listRevisionsID(w, r, docID(r))
+}
+
+func (s *Server) listRevisionsID(w http.ResponseWriter, r *http.Request, id string) {
+	revs, err := s.store.DocRevisions(r.Context(), id)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"revisions": revs, "count": len(revs)})
+}
+
+// cutRevisionRaw splits "myfolio/file.md/revisions/3/raw" into its slug and
+// version. A {rest...} wildcard has to end its pattern, so multi-segment slugs
+// cannot reach the {id} sub-routes and are dispatched by suffix instead — the
+// same shape lockDocRest already uses for POST and DELETE.
+func cutRevisionRaw(rest string) (string, int, bool) {
+	base, ok := strings.CutSuffix(rest, "/raw")
+	if !ok {
+		return "", 0, false
+	}
+	i := strings.LastIndex(base, "/revisions/")
+	if i < 0 {
+		return "", 0, false
+	}
+	version, err := strconv.Atoi(base[i+len("/revisions/"):])
+	if err != nil {
+		return "", 0, false
+	}
+	return base[:i], version, true
 }
 
 // rawRevision streams the content bytes of a specific past version.
@@ -538,7 +605,11 @@ func (s *Server) rawRevision(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, "version must be an integer")
 		return
 	}
-	key, ctype, err := s.store.RevisionContent(r.Context(), docID(r), version)
+	s.rawRevisionID(w, r, docID(r), version)
+}
+
+func (s *Server) rawRevisionID(w http.ResponseWriter, r *http.Request, id string, version int) {
+	key, ctype, err := s.store.RevisionContent(r.Context(), id, version)
 	if err != nil {
 		writeErr(w, err)
 		return
