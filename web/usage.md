@@ -88,7 +88,7 @@ current claimant.
 - `GET /changes?since=&kind=&limit=100` — sequential change feed (`{count, events, next_cursor}`)
 - `GET /changes/stream?since=&kind=` — Server-Sent Events (`text/event-stream`) stream of changes
 
-Events are ordered deterministically by a composite opaque cursor (`workspace:kindshash:xact_id:id`). Pass `since=<cursor>` (the opaque string returned in `next_cursor` or in the SSE `id:` field) to resume after a given event. A cursor is strictly bound to the scope (`workspace` and `kind` filters) that produced it — passing a cursor across a changed workspace or `kind` filter returns HTTP 400. Note: the unsigned cursor is a resumption hint rather than a capability (database RLS strictly enforces row visibility). On empty results, `next_cursor` preserves the current scope and watermark. MCP tool `list_changes` mirrors `GET /changes`.
+Events are ordered deterministically by a composite opaque cursor (`workspace:kindshash:xact_id:id`). Pass `since=<cursor>` (the opaque string returned in `next_cursor` or in the SSE `id:` field) to resume after a given event. The resume parameter is `since`, not `cursor` or `after`; to prevent silent replay from the beginning when misspelled, `/changes` and `/changes/stream` reject unrecognised query parameters with HTTP 400. A cursor is strictly bound to the scope (`workspace` and `kind` filters) that produced it — passing a cursor across a changed workspace or `kind` filter returns HTTP 400. Note: the unsigned cursor is a resumption hint rather than a capability (database RLS strictly enforces row visibility). On empty results, `next_cursor` preserves the current scope and watermark. MCP tool `list_changes` mirrors `GET /changes`.
 
 ## Conventions
 

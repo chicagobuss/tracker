@@ -211,6 +211,21 @@ func badRequest(w http.ResponseWriter, msg string) {
 	writeError(w, http.StatusBadRequest, "bad_request", msg, nil)
 }
 
+func rejectUnknownQueryParams(w http.ResponseWriter, r *http.Request, allowed ...string) bool {
+	allowMap := make(map[string]bool, len(allowed))
+	for _, a := range allowed {
+		allowMap[a] = true
+	}
+	for k := range r.URL.Query() {
+		if !allowMap[k] {
+			msg := fmt.Sprintf("unrecognised query parameter %q; accepted parameters are: %s", k, strings.Join(allowed, ", "))
+			writeError(w, http.StatusBadRequest, "bad_request", msg, nil)
+			return true
+		}
+	}
+	return false
+}
+
 // withMeta merges add into a (possibly empty) metadata blob.
 func withMeta(raw json.RawMessage, add map[string]any) json.RawMessage {
 	m := map[string]any{}
@@ -1132,6 +1147,9 @@ func writeChangesScopeError(w http.ResponseWriter, err error) {
 }
 
 func (s *Server) listChanges(w http.ResponseWriter, r *http.Request) {
+	if rejectUnknownQueryParams(w, r, "kind", "limit", "since", "workspace") {
+		return
+	}
 	ctx, release, err := s.changesContext(r)
 	if err != nil {
 		writeChangesScopeError(w, err)
@@ -1165,6 +1183,9 @@ func (s *Server) listChanges(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) streamChanges(w http.ResponseWriter, r *http.Request) {
+	if rejectUnknownQueryParams(w, r, "kind", "since", "workspace") {
+		return
+	}
 	releaseAuthConn(r.Context())
 
 	reqWS := requestWorkspace(r.Context()).name
