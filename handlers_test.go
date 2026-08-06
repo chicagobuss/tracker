@@ -407,3 +407,51 @@ func TestChanges_CursorScopeMismatch_EmbeddedNewline(t *testing.T) {
 		t.Fatalf("counterexample cursor scope mismatch status = %d, want 400 (body %s)", w.Code, w.Body.String())
 	}
 }
+
+func TestRejectUnknownQueryParams(t *testing.T) {
+	cases := []struct {
+		name       string
+		query      string
+		allowed    []string
+		wantReject bool
+	}{
+		{"empty query", "", []string{"since", "limit"}, false},
+		{"only allowed", "?since=123&limit=10", []string{"since", "limit"}, false},
+		{"one unknown", "?since=123&foo=bar", []string{"since", "limit"}, true},
+		{"all unknown", "?foo=bar&baz=qux", []string{"since", "limit"}, true},
+		{"case sensitive", "?Since=123", []string{"since", "limit"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := http.NewRequest("GET", "/test"+tc.query, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			w := httptest.NewRecorder()
+			got := rejectUnknownQueryParams(w, req, tc.allowed...)
+			if got != tc.wantReject {
+				t.Fatalf("rejectUnknownQueryParams(...) = %v, want %v", got, tc.wantReject)
+			}
+			if got {
+				if w.Code != http.StatusBadRequest {
+					t.Errorf("status = %d, want %d", w.Code, http.StatusBadRequest)
+				}
+				var body map[string]any
+				if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+					t.Fatalf("failed to decode body: %v", err)
+				}
+				errObj, ok := body["error"].(map[string]any)
+				if !ok {
+					t.Fatalf("missing error object in response: %s", w.Body.String())
+				}
+				if code := errObj["code"]; code != "bad_request" {
+					t.Errorf("error.code = %v, want bad_request", code)
+				}
+				msg, _ := errObj["message"].(string)
+				if !strings.Contains(msg, "unrecognised query parameter") {
+					t.Errorf("error.message = %q, want it to contain 'unrecognised query parameter'", msg)
+				}
+			}
+		})
+	}
+}

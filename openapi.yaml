@@ -529,8 +529,8 @@ paths:
         Sequential feed of document and task mutations in the caller's
         workspace. Resume with `since=<cursor>`, passing the `next_cursor` of
         the previous page (or the SSE `id:` field) — **the parameter is `since`,
-        not `cursor`/`after`, and an unrecognized name is ignored, which silently
-        replays the feed from the beginning.** A cursor is bound to the scope
+        not `cursor`/`after`. Unrecognized query parameters are rejected with a
+        400 error.** A cursor is bound to the scope
         that produced it: reusing one under a different workspace or `kind`
         filter is rejected rather than silently re-scoped. The cursor is a
         resumption hint, not a capability — row visibility is enforced by
@@ -565,7 +565,7 @@ paths:
         carries the event JSON in `data:` and its cursor in `id:`. Resume with
         `since=<cursor>` or the standard `Last-Event-ID` header; the same
         caveats apply as for `GET /changes`, so a misspelled resume parameter
-        streams the whole feed from the start.
+        is rejected with a 400 error.
       parameters:
         - { $ref: '#/components/parameters/Workspace' }
         - { $ref: '#/components/parameters/WorkspaceQuery' }
