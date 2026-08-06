@@ -13,6 +13,7 @@ All endpoints are S3-compatible (RustFS, AWS S3, Cloudflare R2).
 """
 import hashlib
 import os, sys
+from concurrent.futures import ThreadPoolExecutor
 import boto3
 from botocore.config import Config
 
@@ -106,17 +107,19 @@ def sync_pool(pool):
     for root, _, files in os.walk(pool):
         for f in files:
             have.add(os.path.relpath(os.path.join(root, f), pool))
-    seen = fetched = 0
+    seen = 0
+    todo = []
     for page in s3.get_paginator("list_objects_v2").paginate(Bucket=b):
         for o in page.get("Contents", []):
             seen += 1
-            if o["Key"] in have:
-                continue
-            dst = _pool_path(pool, o["Key"])
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            s3.download_file(b, o["Key"], dst)
-            fetched += 1
-    print(f"pool sync: {seen} in store, {fetched} newly fetched, {seen - fetched} already held")
+            if o["Key"] not in have:
+                todo.append(o["Key"])
+    for k in todo:
+        os.makedirs(os.path.dirname(_pool_path(pool, k)), exist_ok=True)
+    if todo:
+        with ThreadPoolExecutor(max_workers=int(os.environ.get("BACKUP_PARALLEL", "16"))) as ex:
+            list(ex.map(lambda k: s3.download_file(b, k, _pool_path(pool, k)), todo))
+    print(f"pool sync: {seen} in store, {len(todo)} newly fetched, {seen - len(todo)} already held")
 
 
 def verify_pool(pool, keys_file, deep=False):
@@ -169,6 +172,62 @@ def upload_from_pool(pool, keys_file):
     print(f"uploaded {len(keys)} blobs from pool to {b}")
 
 
+def _pool_prefix():
+    base = os.environ.get("BACKUP_S3_PREFIX", "").strip("/")
+    return (base + "/pool/").lstrip("/")
+
+
+def push_pool(pool):
+    """Mirror the local pool into the backup store, uploading only what is new.
+
+    Without this the offsite copy is a snapshot that references bytes living
+    only on the machine being backed up — which is not an offsite backup. Blobs
+    are immutable, so presence of the key is sufficient: never re-upload.
+    """
+    s3, b = backup_client(), os.environ["BACKUP_S3_BUCKET"]
+    ensure_bucket(s3, b)
+    pre = _pool_prefix()
+    have = set()
+    for page in s3.get_paginator("list_objects_v2").paginate(Bucket=b, Prefix=pre):
+        for o in page.get("Contents", []):
+            have.add(o["Key"][len(pre):])
+    todo, held = [], 0
+    for root, _, files in os.walk(pool):
+        for f in files:
+            full = os.path.join(root, f)
+            key = os.path.relpath(full, pool)
+            if key in have:
+                held += 1
+            else:
+                todo.append((full, key))
+    # Thousands of small objects over a WAN are latency-bound, not
+    # bandwidth-bound, so upload them concurrently. Steady state is a handful of
+    # blobs; this matters for the initial seed and for a rebuild.
+    if todo:
+        with ThreadPoolExecutor(max_workers=int(os.environ.get("BACKUP_PARALLEL", "16"))) as ex:
+            list(ex.map(lambda t: s3.upload_file(t[0], b, pre + t[1]), todo))
+    print(f"pool push: {len(todo)} uploaded, {held} already offsite")
+
+
+def pull_pool(pool):
+    """Disaster recovery: rebuild a local pool from the backup store."""
+    s3, b = backup_client(), os.environ["BACKUP_S3_BUCKET"]
+    pre = _pool_prefix()
+    todo = []
+    for page in s3.get_paginator("list_objects_v2").paginate(Bucket=b, Prefix=pre):
+        for o in page.get("Contents", []):
+            rel = o["Key"][len(pre):]
+            dst = os.path.join(pool, rel)
+            if not os.path.exists(dst):
+                todo.append((o["Key"], dst))
+    for _, dst in todo:
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+    if todo:
+        with ThreadPoolExecutor(max_workers=int(os.environ.get("BACKUP_PARALLEL", "16"))) as ex:
+            list(ex.map(lambda t: s3.download_file(b, t[0], t[1]), todo))
+    print(f"pool pull: {len(todo)} blobs fetched into {pool}")
+
+
 def gc_pool(pool, keep_file):
     """Delete pool objects no retained snapshot and no live doc references."""
     keep = {k.strip() for k in open(keep_file) if k.strip()}
@@ -194,6 +253,8 @@ CMDS = {
     "verify-pool": lambda a: verify_pool(a[0], a[1], "--deep" in a),
     "upload-from-pool": lambda a: upload_from_pool(a[0], a[1]),
     "gc-pool": lambda a: gc_pool(a[0], a[1]),
+    "push-pool": lambda a: push_pool(a[0]),
+    "pull-pool": lambda a: pull_pool(a[0]),
 }
 
 if __name__ == "__main__":

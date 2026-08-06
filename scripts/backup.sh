@@ -22,6 +22,13 @@ command -v uv >/dev/null 2>&1 || \
   PATH="$HOME/.local/bin:$HOME/.cargo/bin:/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:$PATH"
 command -v uv >/dev/null 2>&1 || { echo "uv not found in PATH" >&2; exit 1; }
 
+# Never let two runs overlap. The cron fires hourly; if a run ever outlives its
+# slot (a large initial pool seed, a slow link), a second one starting on top of
+# it would race the pool and the retention prune. Skip rather than pile up.
+LOCK=${BACKUP_LOCK:-/tmp/tracker-backup.lock}
+exec 9>"$LOCK"
+flock -n 9 || { echo "another backup is still running — skipping this slot"; exit 0; }
+
 PG_CONTAINER=${PG_CONTAINER:-tracker-postgres}
 OUT_DIR=${BACKUP_DIR:-./backups}
 # Shared across all snapshots; never pruned by retention (see scripts/gc-pool.sh).
@@ -138,6 +145,9 @@ echo "backup ready: $TAR ($(du -h "$TAR" | cut -f1)) — $DOCS docs, $BLOBS keys
 
 if [ "$UPLOAD" = 1 ]; then
   echo "uploading to backup store..."
+  # The pool first: a snapshot offsite whose blobs are not offsite is not a
+  # backup. Incremental, so this is O(new blobs) like the local sync.
+  uv run --quiet scripts/s3util.py push-pool "$POOL"
   uv run --quiet scripts/s3util.py put-archive "$TAR"
 fi
 
