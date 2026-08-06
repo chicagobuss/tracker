@@ -8,11 +8,17 @@
 #
 # Restores Postgres + uploads blobs to the content store (or local directory). If
 # restoring OVER the live database, stop the tracker container first.
+#
+# Two snapshot formats are accepted:
+#   pool-v2  db.dump + keys.txt; blob bytes come from the shared pool
+#   legacy   db.dump + an embedded blobs/ directory (pre-pool backups)
+# The format is detected from the archive, so old tarballs keep restoring.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 set -a; . ./.env; set +a
 
 PG_CONTAINER=${PG_CONTAINER:-tracker-postgres}
+POOL=${BACKUP_POOL_DIR:-${BACKUP_DIR:-./backups}/pool}
 SRC=""; FROM_S3=""; DB="$PGDATABASE"; BUCKET="$S3_BUCKET"
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -49,13 +55,36 @@ docker exec -i "$PG_CONTAINER" pg_restore -U "$PGUSER" -d "$DB" --clean --if-exi
   | grep -vE 'does not exist, skipping|errors ignored on restore' || true
 
 echo "4/5  restoring blobs"
-if [ "${STORAGE_TYPE:-file}" = "file" ]; then
-  echo "     copying to local directory ${BLOB_DIR:-./data/blobs}"
-  mkdir -p "${BLOB_DIR:-./data/blobs}"
-  cp -a "$WORK/blobs/." "${BLOB_DIR:-./data/blobs}/"
+if [ -d "$WORK/blobs" ]; then
+  # Legacy snapshot: the bytes travel inside the archive.
+  echo "     legacy format (blobs embedded in archive)"
+  if [ "${STORAGE_TYPE:-file}" = "file" ]; then
+    mkdir -p "${BLOB_DIR:-./data/blobs}"
+    cp -a "$WORK/blobs/." "${BLOB_DIR:-./data/blobs}/"
+  else
+    S3_BUCKET="$BUCKET" uv run --quiet scripts/s3util.py upload-blobs "$WORK/blobs"
+  fi
+elif [ -f "$WORK/keys.txt" ]; then
+  # pool-v2: verify the pool can satisfy this snapshot BEFORE touching the
+  # target store, so a restore either completes or does not start.
+  echo "     pool format — $(wc -l < "$WORK/keys.txt" | tr -d ' ') keys from $POOL"
+  [ -d "$POOL" ] || { echo "blob pool not found at $POOL" >&2; exit 1; }
+  if [ "${STORAGE_TYPE:-file}" = "file" ]; then
+    MISSING=0
+    while IFS= read -r k; do [ -n "$k" ] && [ ! -f "$POOL/$k" ] && MISSING=$((MISSING+1)); done < "$WORK/keys.txt"
+    [ "$MISSING" -eq 0 ] || { echo "pool is missing $MISSING of the keys this snapshot needs — refusing" >&2; exit 1; }
+    mkdir -p "${BLOB_DIR:-./data/blobs}"
+    while IFS= read -r k; do
+      [ -n "$k" ] || continue
+      mkdir -p "${BLOB_DIR:-./data/blobs}/$(dirname "$k")"
+      cp -a "$POOL/$k" "${BLOB_DIR:-./data/blobs}/$k"
+    done < "$WORK/keys.txt"
+  else
+    uv run --quiet scripts/s3util.py verify-pool "$POOL" "$WORK/keys.txt"
+    S3_BUCKET="$BUCKET" uv run --quiet scripts/s3util.py upload-from-pool "$POOL" "$WORK/keys.txt"
+  fi
 else
-  echo "     upload blobs -> $BUCKET"
-  S3_BUCKET="$BUCKET" uv run --quiet scripts/s3util.py upload-blobs "$WORK/blobs"
+  echo "     archive has neither blobs/ nor keys.txt — cannot restore content" >&2; exit 1
 fi
 
 echo "5/5  clear stale leases"
