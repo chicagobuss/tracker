@@ -143,27 +143,21 @@ TAR="$OUT_DIR/tracker-backup-$TS.tar.gz"
 tar czf "$TAR" -C "$WORK" db.dump keys.txt manifest.json
 echo "backup ready: $TAR ($(du -h "$TAR" | cut -f1)) — $DOCS docs, $BLOBS keys; pool $POOL_N blobs ($(du -sh "$POOL" | cut -f1))"
 
-if [ "$UPLOAD" = 1 ]; then
-  echo "uploading to backup store..."
-  # The pool first: a snapshot offsite whose blobs are not offsite is not a
-  # backup. Incremental, so this is O(new blobs) like the local sync.
-  uv run --quiet scripts/s3util.py push-pool "$POOL"
-  uv run --quiet scripts/s3util.py put-archive "$TAR"
-
-  # Restore instructions travel WITH the backup. Keeping them only in tracker
-  # is circular: the situation where you need them is the situation where you
-  # cannot read tracker. Regenerated every run so they cannot drift, and
-  # deliberately free of secrets — only variable names, never values.
-  RESTORE_MD="$WORK/RESTORE.md"
-  {
-    sed -n '1,/<!-- FACTS -->/p' scripts/restore-instructions.md | sed '$d'
-    cat <<FACTS
+# Restore instructions travel WITH the backup, local copy included: a directory
+# of snapshots is no use to someone who does not know a snapshot holds no blob
+# bytes. Regenerated every run so it cannot drift from the format it describes,
+# and free of secrets — only variable names, never values.
+{
+  sed -n '1,/<!-- FACTS -->/p' scripts/restore-instructions.md | sed '$d'
+  cat <<FACTS
 ## This instance, as of the latest backup
 
 | | |
 |---|---|
 | written | $(date -Iseconds) |
-| bucket / prefix | \`${BACKUP_S3_BUCKET}\` / \`${BACKUP_S3_PREFIX:-<none>}\` |
+| local snapshots | $OUT_DIR |
+| local blob pool | $POOL |
+| bucket / prefix | \`${BACKUP_S3_BUCKET:-<none>}\` / \`${BACKUP_S3_PREFIX:-<none>}\` |
 | newest snapshot | \`$(basename "$TAR")\` |
 | documents | $DOCS |
 | content keys | $BLOBS |
@@ -173,9 +167,17 @@ if [ "$UPLOAD" = 1 ]; then
 | image | ghcr.io/chicagobuss/tracker:$BINVER |
 | source | https://github.com/chicagobuss/tracker |
 FACTS
-    sed -n '/<!-- FACTS -->/,$p' scripts/restore-instructions.md | tail -n +2
-  } > "$RESTORE_MD"
-  uv run --quiet scripts/s3util.py put-archive "$RESTORE_MD" RESTORE.md
+  sed -n '/<!-- FACTS -->/,$p' scripts/restore-instructions.md | tail -n +2
+} > "$OUT_DIR/RESTORE.md"
+
+if [ "$UPLOAD" = 1 ]; then
+  echo "uploading to backup store..."
+  # The pool first: a snapshot offsite whose blobs are not offsite is not a
+  # backup. Incremental, so this is O(new blobs) like the local sync.
+  uv run --quiet scripts/s3util.py push-pool "$POOL"
+  uv run --quiet scripts/s3util.py put-archive "$TAR"
+
+  uv run --quiet scripts/s3util.py put-archive "$OUT_DIR/RESTORE.md" RESTORE.md
 fi
 
 # Record the fingerprint only after full success, so a failed run retries.
