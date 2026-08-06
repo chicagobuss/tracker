@@ -149,6 +149,33 @@ if [ "$UPLOAD" = 1 ]; then
   # backup. Incremental, so this is O(new blobs) like the local sync.
   uv run --quiet scripts/s3util.py push-pool "$POOL"
   uv run --quiet scripts/s3util.py put-archive "$TAR"
+
+  # Restore instructions travel WITH the backup. Keeping them only in tracker
+  # is circular: the situation where you need them is the situation where you
+  # cannot read tracker. Regenerated every run so they cannot drift, and
+  # deliberately free of secrets — only variable names, never values.
+  RESTORE_MD="$WORK/RESTORE.md"
+  {
+    sed -n '1,/<!-- FACTS -->/p' scripts/restore-instructions.md | sed '$d'
+    cat <<FACTS
+## This instance, as of the latest backup
+
+| | |
+|---|---|
+| written | $(date -Iseconds) |
+| bucket / prefix | \`${BACKUP_S3_BUCKET}\` / \`${BACKUP_S3_PREFIX:-<none>}\` |
+| newest snapshot | \`$(basename "$TAR")\` |
+| documents | $DOCS |
+| content keys | $BLOBS |
+| pool blobs | $POOL_N |
+| snapshot format | pool-v2 (db.dump + keys.txt; blobs live in the pool) |
+| tracker version | $BINVER |
+| image | ghcr.io/chicagobuss/tracker:$BINVER |
+| source | https://github.com/chicagobuss/tracker |
+FACTS
+    sed -n '/<!-- FACTS -->/,$p' scripts/restore-instructions.md | tail -n +2
+  } > "$RESTORE_MD"
+  uv run --quiet scripts/s3util.py put-archive "$RESTORE_MD" RESTORE.md
 fi
 
 # Record the fingerprint only after full success, so a failed run retries.
