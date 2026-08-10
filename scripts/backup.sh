@@ -31,8 +31,8 @@ flock -n 9 || { echo "another backup is still running — skipping this slot"; e
 
 PG_CONTAINER=${PG_CONTAINER:-tracker-postgres}
 OUT_DIR=${BACKUP_DIR:-./backups}
-# Shared across all snapshots; never pruned by retention (see scripts/gc-pool.sh).
-POOL=${BACKUP_POOL_DIR:-$OUT_DIR/pool}
+# Shared across all snapshots; never pruned by retention.
+PACKS=${BACKUP_PACKS_DIR:-$OUT_DIR/packs}
 TS=$(date +%Y%m%d-%H%M%S)
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -74,51 +74,42 @@ fi
 echo "1/5  pg_dump ($PGDATABASE)"
 docker exec "$PG_CONTAINER" pg_dump -U "$PGUSER" -d "$PGDATABASE" -Fc > "$WORK/db.dump"
 
-# 2) Sync new blobs into the shared pool. Runs AFTER the dump: writes are
-#    blob-first, so every content_key the dump references already exists in the
-#    store by the time the dump was taken. Syncing after can only add extra
-#    blobs, never miss a referenced one.
-echo "2/5  sync blob pool"
-mkdir -p "$POOL"
-if [ "${STORAGE_TYPE:-file}" = "file" ]; then
-  SRC_DIR="${BLOB_DIR:-./data/blobs}"
-  if [ -d "$SRC_DIR" ]; then
-    # -u copies only what the pool lacks or what is newer; blobs are immutable,
-    # so in practice this is "only the new ones".
-    cp -au "$SRC_DIR/." "$POOL/"
-  fi
-else
-  uv run --quiet scripts/s3util.py sync-pool "$POOL"
-fi
-
-# 3) The keys this snapshot needs, straight from the restored-to database. Both
-#    live docs and revisions, since history must restore too.
-echo "3/5  keys manifest"
+# 2) Fold new blobs into the packs. Runs AFTER the dump: writes are blob-first,
+#    so every content_key the dump references already exists in the store by the
+#    time the dump was taken. Folding after can only add extra blobs, never miss
+#    a referenced one. Sealed packs are never reopened, so this costs O(new).
+echo "2/5  fold blobs into packs"
 docker exec "$PG_CONTAINER" psql -U "$PGUSER" -d "$PGDATABASE" -tA -c \
   "select distinct content_key from (
      select content_key from documents where content_key is not null and content_key <> ''
      union all
      select content_key from document_revisions where content_key is not null and content_key <> ''
    ) k order by 1" > "$WORK/keys.txt"
+uv run --quiet scripts/blobpack.py fold "$OUT_DIR" < "$WORK/keys.txt"
 
-# A snapshot whose blobs are not all in the pool is not a backup. Fail loudly
-# now rather than at restore time.
-if [ "${STORAGE_TYPE:-file}" = "file" ]; then
-  MISSING=0
-  while IFS= read -r k; do [ -n "$k" ] && [ ! -f "$POOL/$k" ] && MISSING=$((MISSING+1)); done < "$WORK/keys.txt"
-  [ "$MISSING" -eq 0 ] || { echo "pool is missing $MISSING referenced blobs — aborting" >&2; exit 1; }
-  echo "     $(wc -l < "$WORK/keys.txt" | tr -d ' ') keys, all present in pool"
-else
-  uv run --quiet scripts/s3util.py verify-pool "$POOL" "$WORK/keys.txt"
-fi
+# 3) A snapshot the packs cannot serve is not a backup. The index is the record
+#    of which pack holds what, so confirm every key this snapshot needs is in it.
+echo "3/5  check packs cover this snapshot"
+uv run --quiet - "$OUT_DIR" "$WORK/keys.txt" <<'PYEOF'
+import sys, os, hashlib
+work, keyfile = sys.argv[1], sys.argv[2]
+idx_path = os.path.join(work, "packs", "INDEX")
+raw = open(idx_path, "rb").read()
+want = open(idx_path + ".sha256").read().split()[0]
+if hashlib.sha256(raw).hexdigest() != want:
+    sys.exit("INDEX checksum mismatch — refusing to write a snapshot against it")
+held = {l.split(" ", 1)[0] for l in raw.decode().splitlines() if l.strip()}
+need = {l.strip() for l in open(keyfile) if l.strip()}
+absent = need - held
+if absent:
+    sys.exit(f"packs are missing {len(absent)} referenced blob(s) — aborting")
+print(f"     {len(need)} keys, all present in packs")
+PYEOF
 
-# 3) Manifest for sanity-checking a restore. binary_version is the version the
-#    LIVE service reports (the binary that produced this data); fall back to the
-#    repo's git version if the service isn't reachable.
 echo "4/5  manifest"
 DOCS=$(docker exec "$PG_CONTAINER" psql -U "$PGUSER" -d "$PGDATABASE" -tA -c "select count(*) from documents")
 BLOBS=$(wc -l < "$WORK/keys.txt" | tr -d ' ')
-POOL_N=$(find "$POOL" -type f | wc -l | tr -d ' ')
+PACK_N=$(ls -1 "$PACKS"/blobs-*.tar 2>/dev/null | wc -l | tr -d ' ')
 HOST_ADDR=$(echo "$LISTEN_ADDR" | cut -d, -f1)
 BINVER=$(curl -s --max-time 3 "http://$HOST_ADDR/version" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p')
 [ -n "$BINVER" ] || BINVER=$(git describe --tags --always --dirty 2>/dev/null || echo unknown)
@@ -129,8 +120,8 @@ cat > "$WORK/manifest.json" <<EOF
   "git_commit": "$(git rev-parse --short HEAD 2>/dev/null || echo unknown)",
   "documents": $DOCS,
   "blobs": $BLOBS,
-  "pool_blobs": $POOL_N,
-  "format": "pool-v2",
+  "packs": $PACK_N,
+  "format": "pack-v1",
   "pg_dump_format": "custom",
   "storage_type": "${STORAGE_TYPE:-file}",
   "content_bucket": "${S3_BUCKET:-local}"
@@ -141,7 +132,7 @@ EOF
 echo "5/5  tar"
 TAR="$OUT_DIR/tracker-backup-$TS.tar.gz"
 tar czf "$TAR" -C "$WORK" db.dump keys.txt manifest.json
-echo "backup ready: $TAR ($(du -h "$TAR" | cut -f1)) — $DOCS docs, $BLOBS keys; pool $POOL_N blobs ($(du -sh "$POOL" | cut -f1))"
+echo "backup ready: $TAR ($(du -h "$TAR" | cut -f1)) — $DOCS docs, $BLOBS keys; $PACK_N pack(s) ($(du -sh "$PACKS" | cut -f1))"
 
 # Restore instructions travel WITH the backup, local copy included: a directory
 # of snapshots is no use to someone who does not know a snapshot holds no blob
@@ -156,12 +147,12 @@ echo "backup ready: $TAR ($(du -h "$TAR" | cut -f1)) — $DOCS docs, $BLOBS keys
 |---|---|
 | written | $(date -Iseconds) |
 | local snapshots | $OUT_DIR |
-| local blob pool | $POOL |
+| local packs | $OUT_DIR/packs |
 | bucket / prefix | \`${BACKUP_S3_BUCKET:-<none>}\` / \`${BACKUP_S3_PREFIX:-<none>}\` |
 | newest snapshot | \`$(basename "$TAR")\` |
 | documents | $DOCS |
 | content keys | $BLOBS |
-| pool blobs | $POOL_N |
+| packs | $PACK_N |
 | snapshot format | pool-v2 (db.dump + keys.txt; blobs live in the pool) |
 | tracker version | $BINVER |
 | image | ghcr.io/chicagobuss/tracker:$BINVER |
@@ -174,7 +165,7 @@ if [ "$UPLOAD" = 1 ]; then
   echo "uploading to backup store..."
   # The pool first: a snapshot offsite whose blobs are not offsite is not a
   # backup. Incremental, so this is O(new blobs) like the local sync.
-  uv run --quiet scripts/s3util.py push-pool "$POOL"
+  uv run --quiet scripts/blobpack.py push "$OUT_DIR"
   uv run --quiet scripts/s3util.py put-archive "$TAR"
 
   uv run --quiet scripts/s3util.py put-archive "$OUT_DIR/RESTORE.md" RESTORE.md
