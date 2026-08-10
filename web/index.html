@@ -43,7 +43,10 @@
   body { margin:0; font:14px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; color:var(--fg); background:var(--bg); height:100vh; display:flex; flex-direction:column; }
   header { display:flex; gap:.6rem; align-items:center; padding:.55rem .8rem; background:var(--panel); border-bottom:1px solid var(--border); }
   header h1 { font-size:15px; margin:0 .5rem 0 0; font-weight:600; letter-spacing:.5px; }
-  header input { background:var(--input-bg); border:1px solid var(--border); color:var(--fg); border-radius:6px; padding:.35rem .5rem; }
+  header input, header select { background:var(--input-bg); border:1px solid var(--border); color:var(--fg); border-radius:6px; padding:.35rem .5rem; font-size:13px; }
+  header select { cursor:pointer; max-width:170px; text-overflow:ellipsis; }
+  header select:focus, header input:focus { outline:none; border-color:var(--accent); }
+  header select option { background:var(--panel); color:var(--fg); }
   #q { flex:1; }
   #token { width:170px; }
   button { background:var(--btn-bg); color:var(--fg); border:1px solid var(--border); border-radius:6px; padding:.35rem .6rem; cursor:pointer; }
@@ -240,6 +243,7 @@
     <label for="scope-folios">folios</label>
     <div class="slider"></div>
   </div>
+  <select id="workspace" title="Switch workspace"></select>
   <input id="q" placeholder="search…" autocomplete="off">
   <input id="token" placeholder="bearer token (if set)" autocomplete="off">
   <button id="help">? help</button>
@@ -277,17 +281,101 @@
 const $ = s => document.querySelector(s);
 const tokenBox = $("#token");
 tokenBox.value = localStorage.getItem("tracker_token") || "";
-tokenBox.addEventListener("change", () => localStorage.setItem("tracker_token", tokenBox.value.trim()));
+tokenBox.addEventListener("change", async () => {
+  localStorage.setItem("tracker_token", tokenBox.value.trim());
+  await loadWorkspaces();
+  loadList();
+  if (active) openDoc(active);
+  else if (activeFolio) openFolio(activeFolio);
+  else showHelp();
+});
+
+const workspaceSelect = $("#workspace");
+let currentWorkspace = new URLSearchParams(location.search).get("workspace") || localStorage.getItem("tracker_workspace") || "";
 
 function headers() {
+  const h = {};
   const t = tokenBox.value.trim();
-  return t ? { Authorization: "Bearer " + t } : {};
+  if (t) h["Authorization"] = "Bearer " + t;
+  const ws = (workspaceSelect && workspaceSelect.value) ? workspaceSelect.value.trim() : (currentWorkspace || "");
+  if (ws) h["X-Workspace"] = ws;
+  return h;
 }
 async function api(path) {
   const r = await fetch(path, { headers: headers() });
   if (!r.ok) throw new Error("HTTP " + r.status + " on " + path);
+  const serverWs = r.headers.get("X-Workspace");
+  if (serverWs && workspaceSelect && workspaceSelect.value !== serverWs) {
+    if ([...workspaceSelect.options].some(o => o.value === serverWs)) {
+      workspaceSelect.value = serverWs;
+      currentWorkspace = serverWs;
+      localStorage.setItem("tracker_workspace", serverWs);
+    }
+  }
   return r;
 }
+
+async function loadWorkspaces() {
+  let res;
+  try {
+    res = await api("/workspaces");
+  } catch (e) {
+    try {
+      const h = {};
+      const t = tokenBox.value.trim();
+      if (t) h["Authorization"] = "Bearer " + t;
+      const r = await fetch("/workspaces", { headers: h });
+      if (r.ok) res = r;
+    } catch {}
+  }
+  if (!res) {
+    if (!workspaceSelect.children.length) {
+      const opt = document.createElement("option");
+      const val = currentWorkspace || "default";
+      opt.value = val;
+      opt.textContent = `ws: ${val}`;
+      workspaceSelect.appendChild(opt);
+    }
+    return;
+  }
+  try {
+    const { workspaces } = await res.json();
+    if (!workspaces || !workspaces.length) return;
+
+    const prev = currentWorkspace || workspaceSelect.value;
+    workspaceSelect.innerHTML = "";
+
+    let selectedVal = "";
+    for (const ws of workspaces) {
+      const opt = document.createElement("option");
+      opt.value = ws.name;
+      opt.textContent = `ws: ${ws.name}`;
+      if (ws.description) opt.title = ws.description;
+      if (ws.name === prev) {
+        opt.selected = true;
+        selectedVal = ws.name;
+      }
+      workspaceSelect.appendChild(opt);
+    }
+
+    if (!selectedVal && workspaces.length > 0) {
+      const defOpt = workspaces.find(w => w.name === "default") || workspaces[0];
+      workspaceSelect.value = defOpt.name;
+      selectedVal = defOpt.name;
+    }
+    currentWorkspace = selectedVal;
+    localStorage.setItem("tracker_workspace", currentWorkspace);
+  } catch (e) {}
+}
+
+workspaceSelect.addEventListener("change", () => {
+  currentWorkspace = workspaceSelect.value;
+  localStorage.setItem("tracker_workspace", currentWorkspace);
+  active = activeSlug = activeFolio = null;
+  setRoute("");
+  loadList();
+  showHelp();
+});
 
 let active = null, activeSlug = null, activeFolio = null, scope = "all";
 function human(n) { n = +n || 0; return n < 1024 ? n + " B" : (n / 1024).toFixed(1) + " kb"; }
@@ -792,7 +880,7 @@ $("#sort-dir").onclick = () => {
   btn.innerText = btn.innerText === "↓" ? "↑" : "↓";
   applySort();
 };
-$("#refresh").onclick = () => { loadList(); if (active) openDoc(active); else if (activeFolio) openFolio(activeFolio); else showHelp(); };
+$("#refresh").onclick = async () => { await loadWorkspaces(); loadList(); if (active) openDoc(active); else if (activeFolio) openFolio(activeFolio); else showHelp(); };
 $("#help").onclick = showHelp;
 $("#home").onclick = showHelp;
 
@@ -818,8 +906,11 @@ themeToggle.onclick = () => {
 };
 
 marked.setOptions({ gfm: true, breaks: false });
-// Start from the URL, so a shared link opens the thing it points at.
-applyRoute();
+// Start by loading workspaces, then let the URL route open the target item.
+(async () => {
+  await loadWorkspaces();
+  applyRoute();
+})();
 </script>
 </body>
 </html>
