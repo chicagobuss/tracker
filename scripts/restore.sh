@@ -10,15 +10,19 @@
 # restoring OVER the live database, stop the tracker container first.
 #
 # Two snapshot formats are accepted:
-#   pool-v2  db.dump + keys.txt; blob bytes come from the shared pool
-#   legacy   db.dump + an embedded blobs/ directory (pre-pool backups)
-# The format is detected from the archive, so old tarballs keep restoring.
+#   pack-v1  db.dump + keys.txt; blob bytes come from the pack files
+#   pool-v2  db.dump + keys.txt; blob bytes come from the per-file pool
+#   legacy   db.dump + an embedded blobs/ directory
+# The format is detected from what is actually available, so older archives keep
+# restoring for as long as the pool they reference is still on disk.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 set -a; . ./.env; set +a
 
 PG_CONTAINER=${PG_CONTAINER:-tracker-postgres}
-POOL=${BACKUP_POOL_DIR:-${BACKUP_DIR:-./backups}/pool}
+OUT_DIR=${BACKUP_DIR:-./backups}
+PACKS=${BACKUP_PACKS_DIR:-$OUT_DIR/packs}
+POOL=${BACKUP_POOL_DIR:-$OUT_DIR/pool}
 SRC=""; FROM_S3=""; DB="$PGDATABASE"; BUCKET="$S3_BUCKET"
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -64,6 +68,12 @@ if [ -d "$WORK/blobs" ]; then
   else
     S3_BUCKET="$BUCKET" uv run --quiet scripts/s3util.py upload-blobs "$WORK/blobs"
   fi
+elif [ -f "$WORK/keys.txt" ] && [ -f "$PACKS/INDEX" ]; then
+  # pack-v1: blobpack refuses before writing anything if the packs cannot serve
+  # every key, so a restore either completes or does not start.
+  echo "     pack format — $(wc -l < "$WORK/keys.txt" | tr -d ' ') keys from $PACKS"
+  S3_BUCKET="$BUCKET" uv run --quiet scripts/blobpack.py emit "$OUT_DIR" "$WORK/keys.txt"
+
 elif [ -f "$WORK/keys.txt" ]; then
   # pool-v2: verify the pool can satisfy this snapshot BEFORE touching the
   # target store, so a restore either completes or does not start.
