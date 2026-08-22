@@ -108,21 +108,29 @@ elif [ "$FORMAT" = "pack-v1" ]; then
 elif [ -f "$WORK/keys.txt" ]; then
   # pool-v2: verify the pool can satisfy this snapshot BEFORE touching the
   # target store, so a restore either completes or does not start.
-  echo "     pool format — $(wc -l < "$WORK/keys.txt" | tr -d ' ') keys from $POOL"
   [ -d "$POOL" ] || { echo "blob pool not found at $POOL" >&2; exit 1; }
+  # Same snapshot-consistency rule as pack-v1: keys.txt was queried after the
+  # dump, so a hard delete in between can drop a key the dump still references.
+  # Ask the database we actually restored instead.
+  docker exec "$PG_CONTAINER" psql -U "$PGUSER" -d "$DB" -tA -c \
+    "select distinct content_key from (
+       select content_key from documents where content_key is not null and content_key <> ''
+       union all
+       select content_key from document_revisions where content_key is not null and content_key <> ''
+     ) k order by 1" > "$WORK/restore-keys.txt"
+  echo "     pool format — $(wc -l < "$WORK/restore-keys.txt" | tr -d ' ') keys from $POOL"
+  # --deep on both paths: existence is not correctness, and copying a truncated
+  # blob under a sha256 name into the live store is silent, permanent corruption.
+  uv run --quiet scripts/s3util.py verify-pool "$POOL" "$WORK/restore-keys.txt" --deep
   if [ "${STORAGE_TYPE:-file}" = "file" ]; then
-    MISSING=0
-    while IFS= read -r k; do [ -n "$k" ] && [ ! -f "$POOL/$k" ] && MISSING=$((MISSING+1)); done < "$WORK/keys.txt"
-    [ "$MISSING" -eq 0 ] || { echo "pool is missing $MISSING of the keys this snapshot needs — refusing" >&2; exit 1; }
     mkdir -p "${BLOB_DIR:-./data/blobs}"
     while IFS= read -r k; do
       [ -n "$k" ] || continue
       mkdir -p "${BLOB_DIR:-./data/blobs}/$(dirname "$k")"
       cp -a "$POOL/$k" "${BLOB_DIR:-./data/blobs}/$k"
-    done < "$WORK/keys.txt"
+    done < "$WORK/restore-keys.txt"
   else
-    uv run --quiet scripts/s3util.py verify-pool "$POOL" "$WORK/keys.txt"
-    S3_BUCKET="$BUCKET" uv run --quiet scripts/s3util.py upload-from-pool "$POOL" "$WORK/keys.txt"
+    S3_BUCKET="$BUCKET" uv run --quiet scripts/s3util.py upload-from-pool "$POOL" "$WORK/restore-keys.txt"
   fi
 else
   echo "     archive has neither blobs/ nor keys.txt — cannot restore content" >&2; exit 1

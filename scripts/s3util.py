@@ -159,7 +159,13 @@ def _pool_prefix():
     return (base + "/pool/").lstrip("/")
 
 def pull_pool(pool):
-    """Disaster recovery: rebuild a local pool from the backup store."""
+    """Disaster recovery: rebuild a local pool from the backup store.
+
+    Downloads land on a temp name and are hash-checked before they take the real
+    one. Writing straight to the final path and then skipping anything that
+    "exists" meant an interrupted run left a truncated blob that every later run
+    accepted as present — the retry reported zero work and the corruption stayed.
+    """
     s3, b = backup_client(), os.environ["BACKUP_S3_BUCKET"]
     pre = _pool_prefix()
     todo = []
@@ -167,13 +173,32 @@ def pull_pool(pool):
         for o in page.get("Contents", []):
             rel = o["Key"][len(pre):]
             dst = os.path.join(pool, rel)
-            if not os.path.exists(dst):
-                todo.append((o["Key"], dst))
+            if os.path.exists(dst):
+                # Present is not the same as correct: re-fetch anything whose
+                # bytes do not hash to the name it is stored under.
+                if os.path.getsize(dst) == o["Size"] and (
+                        not rel.startswith("sha256/")
+                        or hashlib.sha256(open(dst, "rb").read()).hexdigest() == rel.split("/", 1)[1]):
+                    continue
+            todo.append((o["Key"], dst))
     for _, dst in todo:
         os.makedirs(os.path.dirname(dst), exist_ok=True)
+
+    def _get(t):
+        key, dst = t
+        part = dst + ".part"
+        s3.download_file(b, key, part)
+        rel = key[len(pre):]
+        if rel.startswith("sha256/"):
+            h = hashlib.sha256(open(part, "rb").read()).hexdigest()
+            if h != rel.split("/", 1)[1]:
+                os.remove(part)
+                sys.exit(f"pool object {rel} does not match its own hash — refusing to install it")
+        os.replace(part, dst)
+
     if todo:
         with ThreadPoolExecutor(max_workers=int(os.environ.get("BACKUP_PARALLEL", "16"))) as ex:
-            list(ex.map(lambda t: s3.download_file(b, t[0], t[1]), todo))
+            list(ex.map(_get, todo))
     print(f"pool pull: {len(todo)} blobs fetched into {pool}")
 
 
