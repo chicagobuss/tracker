@@ -99,54 +99,7 @@ docker exec "$PG_CONTAINER" psql -U "$PGUSER" -d "$PGDATABASE" -tA -c \
 # 3) A snapshot the packs cannot serve is not a backup. The index is the record
 #    of which pack holds what, so confirm every key this snapshot needs is in it.
 echo "3/5  check packs cover this snapshot"
-uv run --quiet - "$PACKS" "$WORK/keys.txt" <<'PYEOF'
-import sys, os, hashlib
-packs, keyfile = sys.argv[1], sys.argv[2]
-raw = open(os.path.join(packs, "INDEX"), "rb").read().decode()
-first, _, body = raw.partition("\n")
-if not first.startswith("#blobpack-index-v"):
-    sys.exit("INDEX is not the self-checking format — run `blobpack.py reindex`")
-if hashlib.sha256(body.encode()).hexdigest() != first.split("sha256=", 1)[1].strip():
-    sys.exit("INDEX checksum mismatch — refusing to write a snapshot against it")
-
-held, meta = {}, {}
-for l in body.splitlines():
-    l = l.strip()
-    if l.startswith("#pack "):
-        _, n, d, sz = l.split()
-        meta[n] = (d, int(sz))
-    elif l and not l.startswith("#"):
-        k, _, n = l.partition(" ")
-        held[k] = n
-
-need = {l.strip() for l in open(keyfile) if l.strip()}
-absent = need - held.keys()
-if absent:
-    sys.exit(f"packs are missing {len(absent)} referenced blob(s) — aborting")
-
-# Membership is not coverage. A key can name a pack that is gone, truncated or
-# rotted, and the snapshot would still be declared covered — the failure then
-# surfaces only when someone tries to restore it. Check the bytes this snapshot
-# actually depends on: every pack it needs must exist and still hash to what the
-# index recorded. Packs are few and read sequentially, so this stays cheap.
-def digest(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest(), os.path.getsize(path)
-
-bad = []
-for n in sorted({held[k] for k in need}):
-    p = os.path.join(packs, n)
-    if not os.path.exists(p):
-        bad.append(f"{n}: missing")
-    elif n in meta and digest(p) != meta[n]:
-        bad.append(f"{n}: does not match the digest the index records")
-if bad:
-    sys.exit("refusing to write a snapshot against unusable packs:\n  " + "\n  ".join(bad))
-print(f"     {len(need)} keys across {len({held[k] for k in need})} pack(s), all present and verified")
-PYEOF
+uv run --quiet scripts/blobpack.py coverage "$PACKS" "$WORK/keys.txt"
 
 echo "4/5  manifest"
 DOCS=$(docker exec "$PG_CONTAINER" psql -U "$PGUSER" -d "$PGDATABASE" -tA -c "select count(*) from documents")

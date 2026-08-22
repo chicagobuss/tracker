@@ -20,6 +20,7 @@ file, not a walk of a directory with millions of entries.
   blobpack.py emit    <packsdir> <keyfile> write those keys to the content store (restore)
   blobpack.py verify  <packsdir> [--packs a,b]  re-hash every blob and cross-check the index
   blobpack.py reindex <packsdir>           rebuild INDEX by scanning the pack files
+  blobpack.py coverage <packsdir> [keys]   check every indexed pack is present and intact
   blobpack.py push    <packsdir> [--gc]    mirror packs offsite (sealed ones once)
   blobpack.py gc-offsite <packsdir>        delete offsite packs the offsite index does not name
   blobpack.py pull    <packsdir> [--packs a,b]  fetch packs from offsite
@@ -48,6 +49,7 @@ import os
 import re
 import sys
 import tarfile
+import time
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 
@@ -361,6 +363,13 @@ def _lock(packs, mode):
 
 def _fold_locked(packs, keys):
     idx, meta = read_index(packs)
+    # Test-only fault injection. Serialisation bugs here are timing-dependent, so
+    # a test that merely launches two folds at once usually sees them run one
+    # after another and passes whether or not the lock exists. This widens the
+    # read-modify-write window on demand so the test can prove the lock is doing
+    # the work. Unset in every real run.
+    if os.environ.get("BLOBPACK_TEST_PAUSE"):
+        time.sleep(float(os.environ["BLOBPACK_TEST_PAUSE"]))
     missing = sorted(set(keys) - idx.keys())
     if not missing:
         if not os.path.exists(index_path(packs)):
@@ -633,6 +642,38 @@ def _gc_offsite(s3, bucket, pre, referenced=None):
     return dropped
 
 
+def coverage(packs, keyfile=None):
+    """Prove the packs can serve a snapshot before one is written against them.
+
+    Verifies EVERY pack the index references, not merely the packs named by a key
+    list. The key list is queried after the dump, so a delete racing the dump can
+    shrink it to a set that omits the damaged pack entirely — and a coverage gate
+    driven by that list then hashes nothing and passes. `fold --all` makes the
+    index a superset of anything a dump can reference, so checking all of it is
+    both the cheap option and the correct one.
+    """
+    idx, meta = read_index(packs)
+    bad = []
+    for n in sorted(set(idx.values())):
+        path = os.path.join(packs, n)
+        if not os.path.exists(path):
+            bad.append(f"{n}: missing")
+        elif n not in meta:
+            bad.append(f"{n}: index records no digest for it — run `blobpack.py reindex`")
+        elif _digest(path) != meta[n]:
+            bad.append(f"{n}: does not match the digest the index records")
+    if bad:
+        sys.exit("refusing to write a snapshot against unusable packs:\n  " + "\n  ".join(bad))
+    if keyfile:
+        need = {l.strip() for l in open(keyfile) if l.strip()}
+        absent = need - idx.keys()
+        if absent:
+            sys.exit(f"packs are missing {len(absent)} referenced blob(s) — aborting")
+        print(f"     {len(need)} snapshot keys held; {len(set(idx.values()))} pack(s) present and verified")
+    else:
+        print(f"coverage: {len(idx)} keys across {len(set(idx.values()))} pack(s), all present and verified")
+
+
 def gc_offsite(packs):
     # Exclusive lock: a push on this host may have uploaded a pack whose index is
     # not published yet, and GC reading the still-current index would see it as
@@ -740,6 +781,9 @@ if __name__ == "__main__":
             sys.exit(reindex(packs))
     elif cmd == "push":
         push(packs, gc="--gc" in rest)
+    elif cmd == "coverage":
+        with _lock(packs, fcntl.LOCK_SH):
+            coverage(packs, rest[0] if rest and not rest[0].startswith("--") else None)
     elif cmd == "gc-offsite":
         gc_offsite(packs)
     elif cmd == "pull":
