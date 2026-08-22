@@ -34,7 +34,11 @@ A snapshot is small and contains no blob bytes:
 
 Blobs are immutable and named by their own sha256, so the packs serve every
 snapshot. **A snapshot alone is not a restore — you need the packs too.** A pack
-for a past day is sealed and never changes; only the current day's is rewritten.
+file is never modified: its name contains the sha256 of its own contents, so when
+the current day's pack gains blobs it is published under a new name and the old
+one is removed only after the new `INDEX` naming it is durable. That is what
+makes a backup recoverable if it is interrupted — the index is the only thing
+that moves, and it moves in one step.
 
 If `INDEX` is lost or unreadable, it can be rebuilt from the packs themselves —
 every member is named by its own sha256, so the mapping is recoverable:

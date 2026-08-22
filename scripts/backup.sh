@@ -6,13 +6,14 @@
 #   scripts/backup.sh --upload        # also push to BACKUP_S3_* (R2/S3)
 #
 # Blobs are immutable and named by their own sha256, so a blob already in the
-# pool can never need re-fetching. That is what makes a run cost O(new blobs)
+# packs can never need re-fetching. That is what makes a run cost O(new blobs)
 # rather than O(all blobs), and stores each blob once instead of BACKUP_KEEP
-# times. The snapshot names the keys it needs; the pool holds the bytes.
+# times. The snapshot names the keys it needs; the packs hold the bytes.
 #
-# Restore with scripts/restore.sh, which reads keys.txt and pulls exactly those
-# blobs from the pool. Snapshots written before this change embed a blobs/
-# directory instead; restore.sh still handles those.
+# Restore with scripts/restore.sh, which derives the keys it needs from the
+# database it restored and pulls exactly those blobs from the packs. Snapshots
+# written before this change reference a per-file pool, or embed a blobs/
+# directory; restore.sh still handles both.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 set -a; . ./.env; set +a
@@ -107,18 +108,52 @@ if not first.startswith("#blobpack-index-v"):
     sys.exit("INDEX is not the self-checking format — run `blobpack.py reindex`")
 if hashlib.sha256(body.encode()).hexdigest() != first.split("sha256=", 1)[1].strip():
     sys.exit("INDEX checksum mismatch — refusing to write a snapshot against it")
-held = {l.split(" ", 1)[0] for l in body.splitlines() if l.strip() and not l.startswith("#")}
+
+held, meta = {}, {}
+for l in body.splitlines():
+    l = l.strip()
+    if l.startswith("#pack "):
+        _, n, d, sz = l.split()
+        meta[n] = (d, int(sz))
+    elif l and not l.startswith("#"):
+        k, _, n = l.partition(" ")
+        held[k] = n
+
 need = {l.strip() for l in open(keyfile) if l.strip()}
-absent = need - held
+absent = need - held.keys()
 if absent:
     sys.exit(f"packs are missing {len(absent)} referenced blob(s) — aborting")
-print(f"     {len(need)} keys, all present in packs")
+
+# Membership is not coverage. A key can name a pack that is gone, truncated or
+# rotted, and the snapshot would still be declared covered — the failure then
+# surfaces only when someone tries to restore it. Check the bytes this snapshot
+# actually depends on: every pack it needs must exist and still hash to what the
+# index recorded. Packs are few and read sequentially, so this stays cheap.
+def digest(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest(), os.path.getsize(path)
+
+bad = []
+for n in sorted({held[k] for k in need}):
+    p = os.path.join(packs, n)
+    if not os.path.exists(p):
+        bad.append(f"{n}: missing")
+    elif n in meta and digest(p) != meta[n]:
+        bad.append(f"{n}: does not match the digest the index records")
+if bad:
+    sys.exit("refusing to write a snapshot against unusable packs:\n  " + "\n  ".join(bad))
+print(f"     {len(need)} keys across {len({held[k] for k in need})} pack(s), all present and verified")
 PYEOF
 
 echo "4/5  manifest"
 DOCS=$(docker exec "$PG_CONTAINER" psql -U "$PGUSER" -d "$PGDATABASE" -tA -c "select count(*) from documents")
 BLOBS=$(wc -l < "$WORK/keys.txt" | tr -d ' ')
-PACK_N=$(ls -1 "$PACKS"/blobs-*.tar 2>/dev/null | wc -l | tr -d ' ')
+# Packs the index actually references — a superseded file still on disk is not
+# part of this snapshot and should not be counted as if it were.
+PACK_N=$(grep -c '^#pack ' "$PACKS/INDEX" 2>/dev/null || echo 0)
 HOST_ADDR=$(echo "$LISTEN_ADDR" | cut -d, -f1)
 BINVER=$(curl -s --max-time 3 "http://$HOST_ADDR/version" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p')
 [ -n "$BINVER" ] || BINVER=$(git describe --tags --always --dirty 2>/dev/null || echo unknown)
@@ -156,7 +191,7 @@ echo "backup ready: $TAR ($(du -h "$TAR" | cut -f1)) — $DOCS docs, $BLOBS keys
 |---|---|
 | written | $(date -Iseconds) |
 | local snapshots | $OUT_DIR |
-| local packs | $OUT_DIR/packs |
+| local packs | $PACKS |
 | bucket / prefix | \`${BACKUP_S3_BUCKET:-<none>}\` / \`${BACKUP_S3_PREFIX:-<none>}\` |
 | newest snapshot | \`$(basename "$TAR")\` |
 | documents | $DOCS |

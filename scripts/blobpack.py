@@ -256,14 +256,29 @@ def _framed(n):
 
 
 def _pack_members(path):
-    """name -> bytes for an existing pack, or {} if it is not there."""
+    """name -> bytes for an existing pack, or {} if it is not there.
+
+    Every member is re-hashed on the way in. This is the inductive step that
+    keeps a generation trustworthy: the open pack is the only old data a fold
+    ever copies forward, so validating it here means a new generation can only
+    contain bytes that were correct when it was built. Without it, a payload bit
+    that rotted on disk was silently repacked into the new pack, whose whole-file
+    digest then matched the new index perfectly — so coverage passed, push
+    succeeded, and the corruption was only discovered by a restore.
+    """
     if not os.path.exists(path):
         return {}
     out = {}
     with tarfile.open(path) as tf:
         for m in tf:
-            if m.isfile():
-                out[m.name] = tf.extractfile(m).read()
+            if not m.isfile():
+                continue
+            data = tf.extractfile(m).read()
+            if not _check(m.name, data):
+                sys.exit(f"{os.path.basename(path)} holds a corrupt blob for {m.name} — refusing to "
+                         f"carry it into a new pack. Restore that pack from offsite (`blobpack.py pull`) "
+                         f"or rebuild the index (`blobpack.py reindex`) before backing up again.")
+            out[m.name] = data
     return out
 
 
@@ -619,8 +634,12 @@ def _gc_offsite(s3, bucket, pre, referenced=None):
 
 
 def gc_offsite(packs):
+    # Exclusive lock: a push on this host may have uploaded a pack whose index is
+    # not published yet, and GC reading the still-current index would see it as
+    # unreferenced and delete it out from under the commit.
     s3, bucket = backup_store()
-    n = _gc_offsite(s3, bucket, offsite_prefix())
+    with _lock(packs, fcntl.LOCK_EX):
+        n = _gc_offsite(s3, bucket, offsite_prefix())
     print(f"offsite gc: {n} superseded pack(s) removed")
 
 
