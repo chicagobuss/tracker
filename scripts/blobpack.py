@@ -20,7 +20,8 @@ file, not a walk of a directory with millions of entries.
   blobpack.py emit    <packsdir> <keyfile> write those keys to the content store (restore)
   blobpack.py verify  <packsdir> [--packs a,b]  re-hash every blob and cross-check the index
   blobpack.py reindex <packsdir>           rebuild INDEX by scanning the pack files
-  blobpack.py push    <packsdir>           mirror packs offsite (sealed ones once)
+  blobpack.py push    <packsdir> [--gc]    mirror packs offsite (sealed ones once)
+  blobpack.py gc-offsite <packsdir>        delete offsite packs the offsite index does not name
   blobpack.py pull    <packsdir> [--packs a,b]  fetch packs from offsite
 
 `fold` reads keys from stdin, or with --all enumerates the whole content store.
@@ -39,6 +40,7 @@ than no backup:
     in which a checksum and the data it covers can disagree.
   - Pack data is durable before the index that references it, locally and offsite.
 """
+import contextlib
 import fcntl
 import hashlib
 import io
@@ -265,7 +267,7 @@ def _pack_members(path):
     return out
 
 
-PACK_RE = re.compile(r"^blobs-(\d{8})-(\d{3})(?:-([0-9a-f]{12}))?\.tar$")
+PACK_RE = re.compile(r"^blobs-(\d{8})-(\d{3})(?:-([0-9a-f]{12}|[0-9a-f]{64}))?\.tar$")
 
 
 def _write_pack(packs, day, seq, members):
@@ -292,7 +294,10 @@ def _write_pack(packs, day, seq, members):
         raw.flush()
         os.fsync(raw.fileno())
     digest, size = _digest(tmp)
-    name = f"blobs-{day}-{seq:03d}-{digest[:12]}.tar"
+    # The FULL digest, not a prefix. A truncated one is not an identity: two
+    # different foldings sharing 48 bits resolve to the same pathname, and the
+    # second write then overwrites the pack the committed index still names.
+    name = f"blobs-{day}-{seq:03d}-{digest}.tar"
     os.replace(tmp, os.path.join(packs, name))
     _fsync_dir(packs)
     return name, digest, size
@@ -320,9 +325,23 @@ def fold(packs, keys):
     # the first — silently dropping the earlier run's keys. backup.sh has its own
     # flock, but it is per-host and does not cover a hand-run fold, so hold an
     # exclusive lock on the packs directory itself for the whole read-modify-write.
-    with open(os.path.join(packs, ".lock"), "w") as lk:
-        fcntl.flock(lk, fcntl.LOCK_EX)
+    with _lock(packs, fcntl.LOCK_EX):
         _fold_locked(packs, keys)
+
+
+@contextlib.contextmanager
+def _lock(packs, mode):
+    """Serialise pack-directory access. fold takes LOCK_EX; every reader takes
+    LOCK_SH, because "prune after the index is durable" only protects readers
+    that start after the new index — a push or emit already holding the previous
+    generation would have had its packs deleted underneath it."""
+    os.makedirs(packs, exist_ok=True)
+    with open(os.path.join(packs, ".lock"), "w") as lk:
+        fcntl.flock(lk, mode)
+        try:
+            yield
+        finally:
+            fcntl.flock(lk, fcntl.LOCK_UN)
 
 
 def _fold_locked(packs, keys):
@@ -530,41 +549,79 @@ def offsite_prefix():
     return (base + "/packs/").lstrip("/")
 
 
-def push(packs):
-    """Mirror packs offsite, then move the offsite index, then drop superseded packs.
+def push(packs, gc=False):
+    """Mirror packs offsite, then publish the exact index those packs belong to.
 
-    Pack names are content-addressed, so uploading one can never modify the bytes
-    the committed offsite index refers to. Publication is therefore the single
-    INDEX write: interrupted anywhere before it, the offsite generation is exactly
-    what it was; interrupted after it, the new generation is complete.
+    Two rules make this recoverable. First, push uploads the INDEX *bytes it
+    read*, not whatever is at the pathname later — otherwise a fold committing
+    mid-push publishes an index offsite whose packs push never selected or
+    uploaded. Second, superseded remote packs are not deleted here: a delete
+    decided from a listing taken before another pusher's upload can remove the
+    winning generation's packs. Offsite GC is a separate, explicit operation.
     """
     s3, bucket = backup_store()
     if not any(b["Name"] == bucket for b in s3.list_buckets().get("Buckets", [])):
         s3.create_bucket(Bucket=bucket)
     pre = offsite_prefix()
-    remote = {}
+    with _lock(packs, fcntl.LOCK_SH):
+        with open(index_path(packs), "rb") as f:
+            index_bytes = f.read()
+        idx, meta = _parse_index(index_bytes)
+        referenced = sorted(set(idx.values()))
+        remote = {}
+        for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=pre):
+            for o in page.get("Contents", []):
+                remote[o["Key"][len(pre):]] = o["Size"]
+        sent = skipped = 0
+        for name in referenced:
+            path = os.path.join(packs, name)
+            digest, size = meta.get(name) or _digest(path)
+            if _digest(path) != (digest, size):
+                sys.exit(f"local pack {name} does not match the digest the index records — refusing to publish it")
+            if remote.get(name) == size and _remote_digest(s3, bucket, pre + name) == digest:
+                skipped += 1
+                continue
+            s3.upload_file(path, bucket, pre + name, ExtraArgs={"Metadata": {"sha256": digest}})
+            sent += 1
+        # Publication: the index that describes exactly the packs just verified.
+        s3.put_object(Bucket=bucket, Key=pre + "INDEX", Body=index_bytes)
+    dropped = _gc_offsite(s3, bucket, pre, set(referenced)) if gc else 0
+    tail = f", {dropped} superseded removed" if gc else ""
+    print(f"pack push: {sent} uploaded, {skipped} already offsite{tail}")
+
+
+def _remote_digest(s3, bucket, key):
+    try:
+        return s3.head_object(Bucket=bucket, Key=key).get("Metadata", {}).get("sha256")
+    except s3.exceptions.ClientError:
+        return None
+
+
+def _gc_offsite(s3, bucket, pre, referenced=None):
+    """Delete offsite packs the CURRENT offsite index does not name.
+
+    Re-reads the index from the store immediately beforehand rather than trusting
+    a listing taken earlier, so this cannot delete a generation another pusher
+    committed in the meantime. Still assumes no push is running concurrently —
+    which is why it is not part of push.
+    """
+    body = s3.get_object(Bucket=bucket, Key=pre + "INDEX")["Body"].read()
+    idx, _ = _parse_index(body)
+    live = set(idx.values()) | (referenced or set())
+    dropped = 0
     for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=pre):
         for o in page.get("Contents", []):
-            remote[o["Key"][len(pre):]] = o["Size"]
-    idx, meta = read_index(packs)
-    referenced = set(idx.values())
-    sent = skipped = 0
-    for name in sorted(referenced):
-        path = os.path.join(packs, name)
-        digest, size = meta.get(name) or _digest(path)
-        if remote.get(name) == size:
-            skipped += 1
-            continue
-        s3.upload_file(path, bucket, pre + name, ExtraArgs={"Metadata": {"sha256": digest}})
-        sent += 1
-    s3.upload_file(index_path(packs), bucket, pre + "INDEX")
-    # Only now, with the new index committed offsite, can superseded packs go.
-    dropped = 0
-    for name in remote:
-        if name != "INDEX" and PACK_RE.match(name) and name not in referenced:
-            s3.delete_object(Bucket=bucket, Key=pre + name)
-            dropped += 1
-    print(f"pack push: {sent} uploaded, {skipped} already offsite, {dropped} superseded removed")
+            rel = o["Key"][len(pre):]
+            if rel != "INDEX" and PACK_RE.match(rel) and rel not in live:
+                s3.delete_object(Bucket=bucket, Key=o["Key"])
+                dropped += 1
+    return dropped
+
+
+def gc_offsite(packs):
+    s3, bucket = backup_store()
+    n = _gc_offsite(s3, bucket, offsite_prefix())
+    print(f"offsite gc: {n} superseded pack(s) removed")
 
 
 def pull(packs, only=None):
@@ -613,11 +670,24 @@ def pull(packs, only=None):
         list(ex.map(_get, todo))
     _fsync_dir(packs)
 
-    absent = sorted(n for n in referenced if not os.path.exists(os.path.join(packs, n)))
-    if absent:
+    # Existence is not satisfaction: a filtered pull only digest-checks what it
+    # fetched, so a pack already present but corrupt would let the guard pass.
+    unsatisfied = []
+    for n in sorted(referenced):
+        path = os.path.join(packs, n)
+        if not os.path.exists(path) or (n in meta and _digest(path) != meta[n]):
+            unsatisfied.append(n)
+    if unsatisfied:
         os.remove(tmp)
-        sys.exit(f"refusing to install an index naming {len(absent)} pack(s) not present here "
-                 f"(e.g. {absent[0]}) — run without --packs for a complete generation")
+        sys.exit(f"refusing to install an index naming {len(unsatisfied)} pack(s) missing or "
+                 f"mismatched here (e.g. {unsatisfied[0]}) — run without --packs for a complete generation")
+    # The candidate index must be durable before it replaces a working one, or a
+    # power loss leaves a durable name over bytes that never reached the disk.
+    fd = os.open(tmp, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
     os.replace(tmp, index_path(packs))
     _fsync_dir(packs)
     if os.path.exists(index_path(packs) + ".sha256"):
@@ -639,14 +709,22 @@ if __name__ == "__main__":
         else:
             fold(packs, [l.strip() for l in sys.stdin if l.strip()])
     elif cmd == "emit":
-        emit(packs, rest[0])
+        # Shared lock: a fold committing mid-restore would otherwise prune the
+        # pack this emit is part-way through reading.
+        with _lock(packs, fcntl.LOCK_SH):
+            emit(packs, rest[0])
     elif cmd == "verify":
-        sys.exit(verify(packs, only))
+        with _lock(packs, fcntl.LOCK_SH):
+            sys.exit(verify(packs, only))
     elif cmd == "reindex":
-        sys.exit(reindex(packs))
+        with _lock(packs, fcntl.LOCK_EX):
+            sys.exit(reindex(packs))
     elif cmd == "push":
-        push(packs)
+        push(packs, gc="--gc" in rest)
+    elif cmd == "gc-offsite":
+        gc_offsite(packs)
     elif cmd == "pull":
-        pull(packs, only)
+        with _lock(packs, fcntl.LOCK_EX):
+            pull(packs, only)
     else:
         sys.exit(f"unknown command {cmd}")

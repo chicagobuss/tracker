@@ -22,7 +22,7 @@ The tracker image and source are both public — no GitHub account required:
 ## What is in the bucket
 
     <prefix>/tracker-backup-<timestamp>.tar.gz   point-in-time snapshots
-    <prefix>/packs/blobs-<YYYYMMDD>-NNN.tar      content blobs, shared by all snapshots
+    <prefix>/packs/blobs-<YYYYMMDD>-NNN-<sha256>.tar  content blobs, shared by all snapshots
     <prefix>/packs/INDEX                         which pack holds which blob (self-checking)
     <prefix>/RESTORE.md                          this file
 
