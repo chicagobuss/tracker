@@ -24,7 +24,10 @@ PG_CONTAINER=${PG_CONTAINER:-tracker-postgres}
 OUT_DIR=${BACKUP_DIR:-./backups}
 PACKS=${BACKUP_PACKS_DIR:-$OUT_DIR/packs}
 POOL=${BACKUP_POOL_DIR:-$OUT_DIR/pool}
-SRC=""; FROM_S3=""; DB="$PGDATABASE"; BUCKET="$S3_BUCKET"
+# S3_BUCKET is commented out in the default (STORAGE_TYPE=file) .env, and this
+# runs under `set -u`, so referencing it unguarded aborted every file-backend
+# restore before argument parsing even began.
+SRC=""; FROM_S3=""; DB="$PGDATABASE"; BUCKET="${S3_BUCKET:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --from-s3) FROM_S3="$2"; shift 2;;

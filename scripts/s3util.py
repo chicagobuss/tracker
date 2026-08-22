@@ -11,7 +11,10 @@
 
 All endpoints are S3-compatible (RustFS, AWS S3, Cloudflare R2).
 """
+import hashlib
 import os, sys
+from concurrent.futures import ThreadPoolExecutor
+
 import boto3
 from botocore.config import Config
 

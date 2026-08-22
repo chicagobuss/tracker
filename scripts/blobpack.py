@@ -39,6 +39,7 @@ than no backup:
     in which a checksum and the data it covers can disagree.
   - Pack data is durable before the index that references it, locally and offsite.
 """
+import fcntl
 import hashlib
 import io
 import os
@@ -52,7 +53,7 @@ from botocore.config import Config
 
 PACK_MAX = int(os.environ.get("BACKUP_PACK_MAX_BYTES", 64 * 1024 * 1024))
 PAR = int(os.environ.get("BACKUP_PARALLEL", "16"))
-INDEX_MAGIC = "#blobpack-index-v2"
+INDEX_MAGIC = "#blobpack-index-v3"
 FETCH_BATCH = int(os.environ.get("BACKUP_FETCH_BATCH", "256"))
 
 
@@ -152,9 +153,15 @@ def index_path(packs):
 
 
 def _parse_index(raw):
+    """-> (key -> pack, pack -> (sha256, size)).
+
+    The pack digests are what let push and pull decide identity by content. Size
+    alone cannot: a pack rewritten with different bytes but the same length reads
+    as "already there", and the index then names bytes that are not present.
+    """
     text = raw.decode()
     first, _, rest = text.partition("\n")
-    if first.startswith(INDEX_MAGIC):
+    if first.startswith("#blobpack-index-v"):
         want = first.split("sha256=", 1)[1].strip()
         got = hashlib.sha256(rest.encode()).hexdigest()
         if want != got:
@@ -162,22 +169,31 @@ def _parse_index(raw):
         body = rest
     else:
         body = text  # legacy v1 index; checksum lived alongside, verified by caller
-    idx = {}
+    idx, meta = {}, {}
     for line in body.splitlines():
-        k, _, name = line.strip().partition(" ")
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("#pack "):
+            _, name, digest, size = line.split()
+            meta[name] = (digest, int(size))
+            continue
+        if line.startswith("#"):
+            continue
+        k, _, name = line.partition(" ")
         if k:
             idx[k] = name
-    return idx
+    return idx, meta
 
 
 def read_index(packs):
     p = index_path(packs)
     if not os.path.exists(p):
-        return {}
+        return {}, {}
     with open(p, "rb") as f:
         raw = f.read()
     legacy_sum = p + ".sha256"
-    if not raw.startswith(INDEX_MAGIC.encode()) and os.path.exists(legacy_sum):
+    if not raw.startswith(b"#blobpack-index-v") and os.path.exists(legacy_sum):
         with open(legacy_sum) as f:
             want = f.read().split()[0]
         if hashlib.sha256(raw).hexdigest() != want:
@@ -185,8 +201,19 @@ def read_index(packs):
     return _parse_index(raw)
 
 
-def write_index(packs, idx):
-    body = "".join(f"{k} {idx[k]}\n" for k in sorted(idx))
+def _digest(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest(), os.path.getsize(path)
+
+
+def write_index(packs, idx, meta=None):
+    if meta is None:
+        meta = {n: _digest(os.path.join(packs, n)) for n in sorted(set(idx.values()))}
+    body = "".join(f"#pack {n} {meta[n][0]} {meta[n][1]}\n" for n in sorted(meta))
+    body += "".join(f"{k} {idx[k]}\n" for k in sorted(idx))
     raw = (f"{INDEX_MAGIC} sha256={hashlib.sha256(body.encode()).hexdigest()}\n" + body).encode()
     p = index_path(packs)
     tmp = p + ".tmp"
@@ -258,11 +285,22 @@ def _write_pack(path, members):
 
 def fold(packs, keys):
     os.makedirs(packs, exist_ok=True)
-    idx = read_index(packs)
+    # Two folds against one packs directory would each read the index, each
+    # rewrite a pack, and the second would publish an index with no knowledge of
+    # the first — silently dropping the earlier run's keys. backup.sh has its own
+    # flock, but it is per-host and does not cover a hand-run fold, so hold an
+    # exclusive lock on the packs directory itself for the whole read-modify-write.
+    with open(os.path.join(packs, ".lock"), "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        _fold_locked(packs, keys)
+
+
+def _fold_locked(packs, keys):
+    idx, meta = read_index(packs)
     missing = sorted(set(keys) - idx.keys())
     if not missing:
         if not os.path.exists(index_path(packs)):
-            write_index(packs, idx)  # first run with nothing to store still needs an index
+            write_index(packs, idx, meta)  # first run with nothing to store still needs an index
         print(f"packs: 0 new, {len(idx)} held across {len(set(idx.values()))} pack(s)")
         return
 
@@ -280,6 +318,7 @@ def fold(packs, keys):
         members = {}
 
     added = 0
+    written = set()
     size = sum(_framed(len(v)) for v in members.values())
     for i in range(0, len(missing), FETCH_BATCH):
         batch = missing[i:i + FETCH_BATCH]
@@ -291,6 +330,7 @@ def fold(packs, keys):
             # Roll over BEFORE the blob that would burst the cap, not after.
             if members and size + _framed(len(data)) > PACK_MAX:
                 _write_pack(os.path.join(packs, name), members)
+                written.add(name)
                 seq += 1
                 name = f"blobs-{today}-{seq:03d}.tar"
                 members, size = {}, 0
@@ -300,18 +340,28 @@ def fold(packs, keys):
             added += 1
 
     _write_pack(os.path.join(packs, name), members)
+    written.add(name)
+    for n in written:
+        meta[n] = _digest(os.path.join(packs, n))
     # Index last: it may only ever name packs whose bytes are already durable.
-    write_index(packs, idx)
+    write_index(packs, idx, meta)
     sealed = sum(1 for n in set(idx.values()) if not n.startswith(f"blobs-{today}-"))
     print(f"packs: {added} new into {name}, {len(idx)} held across "
           f"{len(set(idx.values()))} pack(s) ({sealed} sealed) [{backend.kind}]")
 
 
 def verify(packs, only=None):
-    idx = read_index(packs)
+    idx, meta = read_index(packs)
     names = sorted(only or set(idx.values()))
     bad = n = 0
     seen = set()
+    for name in names:
+        p = os.path.join(packs, name)
+        if name in meta and os.path.exists(p):
+            digest, size = _digest(p)
+            if (digest, size) != meta[name]:
+                print(f"  PACK DIGEST MISMATCH {name}: index records {meta[name][0][:12]}…, file is {digest[:12]}…")
+                bad += 1
     for name in names:
         p = os.path.join(packs, name)
         if not os.path.exists(p):
@@ -330,12 +380,14 @@ def verify(packs, only=None):
                     print(f"  MISPLACED {m.name}: index says {idx[m.name]}, found in {name}")
                     bad += 1
     # The index promising a blob that no pack holds is the failure that makes a
-    # restore die halfway, so check that direction too.
-    if only is None:
-        for k, name in idx.items():
-            if k not in seen:
-                print(f"  ORPHAN INDEX ENTRY {k} -> {name} (no such member)")
-                bad += 1
+    # restore die halfway, so check that direction too. Under --packs this is
+    # restricted to the selected packs rather than skipped: skipping it made a
+    # filtered verify return success for an indexed-but-absent member.
+    scope = set(names)
+    for k, name in idx.items():
+        if name in scope and k not in seen:
+            print(f"  ORPHAN INDEX ENTRY {k} -> {name} (no such member)")
+            bad += 1
     print(f"verify: {n} blobs across {len(names)} pack(s), {bad} problem(s)")
     return 1 if bad else 0
 
@@ -357,7 +409,7 @@ def reindex(packs):
                     bad += 1
                     continue
                 idx[m.name] = name  # duplicates are byte-identical: the key IS the hash
-    write_index(packs, idx)
+    write_index(packs, idx, {n_: _digest(os.path.join(packs, n_)) for n_ in sorted(set(idx.values()))})
     print(f"reindex: {len(idx)} keys from {n} member(s) across {len(names)} pack(s), {bad} rejected")
     return 1 if bad else 0
 
@@ -370,7 +422,7 @@ def emit(packs, keyfile):
     discovers a missing blob halfway through has already corrupted the target.
     """
     keys = {k.strip() for k in open(keyfile) if k.strip()}
-    idx = read_index(packs)
+    idx, _meta = read_index(packs)
     absent = sorted(keys - idx.keys())
     if absent:
         sys.exit(f"packs cannot satisfy this restore: {len(absent)} key(s) not in any pack "
@@ -400,7 +452,19 @@ def emit(packs, keyfile):
     sent = 0
     for name, want in sorted(by_pack.items()):
         with tarfile.open(os.path.join(packs, name)) as tf:
-            batch = [(m.name, tf.extractfile(m).read()) for m in tf if m.name in want]
+            batch = []
+            for m in tf:
+                if m.name not in want:
+                    continue
+                data = tf.extractfile(m).read()
+                # Re-hash here, not only in the preflight pass. Trusting the
+                # first pass means a pack replaced between the two passes can
+                # put wrong bytes into the content store under a correct name.
+                if not _check(m.name, data):
+                    sys.exit(f"pack {name} changed under us: {m.name} no longer matches its hash — restore aborted")
+                batch.append((m.name, data))
+        if len(batch) != len(want):
+            sys.exit(f"pack {name} lost {len(want) - len(batch)} member(s) between preflight and read — restore aborted")
         with ThreadPoolExecutor(max_workers=PAR) as ex:
             list(ex.map(lambda t: backend.put(t[0], t[1]), batch))
         sent += len(batch)
@@ -420,20 +484,22 @@ def push(packs):
     if not any(b["Name"] == bucket for b in s3.list_buckets().get("Buckets", [])):
         s3.create_bucket(Bucket=bucket)
     pre = offsite_prefix()
-    have = {}
-    for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=pre):
-        for o in page.get("Contents", []):
-            have[o["Key"][len(pre):]] = o["Size"]
-    idx = read_index(packs)
-    today = _today()
+    idx, meta = read_index(packs)
     sent = skipped = 0
     for name in sorted(set(idx.values())):
         p = os.path.join(packs, name)
-        size = os.path.getsize(p)
-        if have.get(name) == size and not name.startswith(f"blobs-{today}-"):
-            skipped += 1
-            continue
-        s3.upload_file(p, bucket, pre + name)
+        digest, size = meta.get(name) or _digest(p)
+        # Identity by content, not by size or by which day it is. A sealed pack
+        # and a rewritten open pack are both "already offsite" only if the bytes
+        # up there hash to what our index records.
+        try:
+            head = s3.head_object(Bucket=bucket, Key=pre + name)
+            if head.get("Metadata", {}).get("sha256") == digest and head["ContentLength"] == size:
+                skipped += 1
+                continue
+        except s3.exceptions.ClientError:
+            pass
+        s3.upload_file(p, bucket, pre + name, ExtraArgs={"Metadata": {"sha256": digest}})
         sent += 1
     # Index last, for the same reason it is written last locally: an offsite
     # index must never reference pack bytes that are not offsite yet.
@@ -442,34 +508,47 @@ def push(packs):
 
 
 def pull(packs, only=None):
+    """Fetch the index first, then any pack whose local bytes do not hash to what
+    that index records, then install the index.
+
+    Deciding by object size skipped a pack that had been rewritten to the same
+    length, leaving a fresh valid index naming stale bytes — a restore that
+    passes every check and produces the wrong content. The index is installed
+    last so an interrupted pull leaves the previous working pair intact.
+    """
     s3, bucket = backup_store()
     pre = offsite_prefix()
     os.makedirs(packs, exist_ok=True)
-    todo = []
-    for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=pre):
-        for o in page.get("Contents", []):
-            rel = o["Key"][len(pre):]
-            if rel == "INDEX":
-                continue  # always refetched below; size is not an identity check
-            if only and rel not in set(only):
-                continue
-            dst = os.path.join(packs, rel)
-            if os.path.exists(dst) and os.path.getsize(dst) == o["Size"]:
-                continue
-            todo.append((o["Key"], dst))
-    with ThreadPoolExecutor(max_workers=PAR) as ex:
-        list(ex.map(lambda t: s3.download_file(bucket, t[0], t[1]), todo))
-    # Fetch the index to a temp path and parse (which verifies it) before it is
-    # allowed to replace a copy that currently works.
     tmp = index_path(packs) + ".fetch"
     s3.download_file(bucket, pre + "INDEX", tmp)
     with open(tmp, "rb") as f:
-        _parse_index(f.read())
+        idx, meta = _parse_index(f.read())
+
+    wanted = set(only) if only else set(idx.values())
+    todo = []
+    for name in sorted(wanted):
+        dst = os.path.join(packs, name)
+        if os.path.exists(dst) and name in meta and _digest(dst) == meta[name]:
+            continue
+        todo.append(name)
+
+    def _get(name):
+        dst = os.path.join(packs, name)
+        part = dst + ".fetch"
+        s3.download_file(bucket, pre + name, part)
+        if name in meta and _digest(part) != meta[name]:
+            os.remove(part)
+            sys.exit(f"pack {name} fetched from offsite does not match the digest the index records — aborting")
+        os.replace(part, dst)
+
+    with ThreadPoolExecutor(max_workers=PAR) as ex:
+        list(ex.map(_get, todo))
+    _fsync_dir(packs)
     os.replace(tmp, index_path(packs))
     _fsync_dir(packs)
     if os.path.exists(index_path(packs) + ".sha256"):
         os.remove(index_path(packs) + ".sha256")
-    print(f"pack pull: {len(todo)} pack(s) + INDEX fetched into {packs}")
+    print(f"pack pull: {len(todo)} pack(s) refreshed, INDEX installed in {packs}")
 
 
 if __name__ == "__main__":

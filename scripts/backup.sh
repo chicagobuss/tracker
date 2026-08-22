@@ -103,11 +103,11 @@ import sys, os, hashlib
 packs, keyfile = sys.argv[1], sys.argv[2]
 raw = open(os.path.join(packs, "INDEX"), "rb").read().decode()
 first, _, body = raw.partition("\n")
-if not first.startswith("#blobpack-index-v2"):
-    sys.exit("INDEX is not the self-checking v2 format — run `blobpack.py reindex`")
+if not first.startswith("#blobpack-index-v"):
+    sys.exit("INDEX is not the self-checking format — run `blobpack.py reindex`")
 if hashlib.sha256(body.encode()).hexdigest() != first.split("sha256=", 1)[1].strip():
     sys.exit("INDEX checksum mismatch — refusing to write a snapshot against it")
-held = {l.split(" ", 1)[0] for l in body.splitlines() if l.strip()}
+held = {l.split(" ", 1)[0] for l in body.splitlines() if l.strip() and not l.startswith("#")}
 need = {l.strip() for l in open(keyfile) if l.strip()}
 absent = need - held
 if absent:
