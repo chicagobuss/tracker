@@ -112,11 +112,32 @@ b = "\n".join(body) + "\n"
 open(p, "w").write("#blobpack-index-v3 sha256=" + hashlib.sha256(b.encode()).hexdigest() + "\n" + b)
 PY
 bp "$S3" verify "$P3" >/dev/null 2>&1; check "verify catches an index entry with no member" "$?" "1"
-echo "sha256/$(printf '0%.0s' $(seq 64))" > "$WORK/ghost.txt"
+# The absent key must live in a DIFFERENT pack from the satisfiable ones, and be
+# reached last. With everything in one pack, an emit that writes as it goes still
+# fails on that pack before writing, so it is indistinguishable from one that
+# preflights properly. Across packs, a write-as-you-go emit flushes the first
+# pack before discovering the problem in the second.
+S3M="$WORK/s3m"; P3M="$WORK/p3m"; mkdir -p "$P3M"; seed "$S3M" 40
+STORAGE_TYPE=file BLOB_DIR="$S3M" BACKUP_PACK_MAX_BYTES=6000 \
+  uv run --quiet "$BP" fold "$P3M" --all >/dev/null
+NPACKS=$(grep -c '^#pack ' "$P3M/INDEX")
+[ "$NPACKS" -gt 1 ] && ok "the preflight fixture spans several packs" \
+                    || bad "the preflight fixture spans several packs ($NPACKS)"
+python3 - "$P3M" <<'PYG'
+import hashlib, sys
+p = f"{sys.argv[1]}/INDEX"
+lines = open(p).read().splitlines()
+last = [l.split()[1] for l in lines if l.startswith("#pack ")][-1]
+body = lines[1:] + ["sha256/" + "0" * 64 + " " + last]   # absent key, in the LAST pack
+b = "\n".join(body) + "\n"
+open(p, "w").write("#blobpack-index-v3 sha256=" + hashlib.sha256(b.encode()).hexdigest() + "\n" + b)
+PYG
+keys "$P3M" > "$WORK/mixed.txt"
 O3="$WORK/o3"; mkdir -p "$O3"
-bp "$O3" emit "$P3" "$WORK/ghost.txt" >/dev/null 2>&1
-check "emit refuses a key whose bytes are absent" "$?" "1"
-check "a refused emit writes nothing" "$(find "$O3" -type f | wc -l | tr -d ' ')" "0"
+bp "$O3" emit "$P3M" "$WORK/mixed.txt" >/dev/null 2>&1
+check "emit refuses when any requested key is absent" "$?" "1"
+check "a refused emit writes NOTHING, not even keys from other packs" \
+  "$(find "$O3" -type f | wc -l | tr -d ' ')" "0"
 
 # --- a pack rewritten to the same length must not read as unchanged ----------
 S4="$WORK/s4"; P4="$WORK/p4"; mkdir -p "$P4"; seed "$S4" 8
