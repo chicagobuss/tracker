@@ -9,12 +9,13 @@
 # Restores Postgres + uploads blobs to the content store (or local directory). If
 # restoring OVER the live database, stop the tracker container first.
 #
-# Two snapshot formats are accepted:
+# Three snapshot formats are accepted:
 #   pack-v1  db.dump + keys.txt; blob bytes come from the pack files
 #   pool-v2  db.dump + keys.txt; blob bytes come from the per-file pool
 #   legacy   db.dump + an embedded blobs/ directory
-# The format is detected from what is actually available, so older archives keep
-# restoring for as long as the pool they reference is still on disk.
+# The format is read from the snapshot's own manifest.json, not guessed from what
+# happens to exist on this host, so a pool-era archive still restores from the
+# pool even on a machine that has since started writing packs.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 set -a; . ./.env; set +a
@@ -55,10 +56,26 @@ docker exec "$PG_CONTAINER" psql -U "$PGUSER" -d postgres -tAc \
   || docker exec "$PG_CONTAINER" createdb -U "$PGUSER" "$DB"
 
 echo "3/5  pg_restore -> $DB"
-docker exec -i "$PG_CONTAINER" pg_restore -U "$PGUSER" -d "$DB" --clean --if-exists --no-owner < "$WORK/db.dump" 2>&1 \
-  | grep -vE 'does not exist, skipping|errors ignored on restore' || true
+# Capture, then judge. Piping straight into grep discarded pg_restore's exit
+# status, so a corrupt dump, a permission failure or a half-restored table all
+# ended with "restore complete" as long as a documents table existed afterwards.
+if ! docker exec -i "$PG_CONTAINER" pg_restore -U "$PGUSER" -d "$DB" --clean --if-exists --no-owner \
+      < "$WORK/db.dump" > "$WORK/pg_restore.log" 2>&1; then
+  grep -vE 'does not exist, skipping|errors ignored on restore' "$WORK/pg_restore.log" >&2 || true
+  echo "pg_restore failed — the target database is NOT a usable restore" >&2
+  exit 1
+fi
+grep -vE 'does not exist, skipping|errors ignored on restore' "$WORK/pg_restore.log" || true
 
 echo "4/5  restoring blobs"
+# The snapshot states its own format. Detecting it from what happens to be on
+# this host routed every keys.txt snapshot to the packs the moment a pack INDEX
+# existed, so a pool-era archive would fail against an index that never held its
+# keys instead of reading the pool that does.
+FORMAT=$(sed -n 's/.*"format"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$WORK/manifest.json" 2>/dev/null || true)
+[ -n "$FORMAT" ] || FORMAT=$([ -d "$WORK/blobs" ] && echo legacy || echo pool-v2)
+echo "     format: $FORMAT"
+
 if [ -d "$WORK/blobs" ]; then
   # Legacy snapshot: the bytes travel inside the archive.
   echo "     legacy format (blobs embedded in archive)"
@@ -68,11 +85,22 @@ if [ -d "$WORK/blobs" ]; then
   else
     S3_BUCKET="$BUCKET" uv run --quiet scripts/s3util.py upload-blobs "$WORK/blobs"
   fi
-elif [ -f "$WORK/keys.txt" ] && [ -f "$PACKS/INDEX" ]; then
-  # pack-v1: blobpack refuses before writing anything if the packs cannot serve
-  # every key, so a restore either completes or does not start.
-  echo "     pack format — $(wc -l < "$WORK/keys.txt" | tr -d ' ') keys from $PACKS"
-  S3_BUCKET="$BUCKET" uv run --quiet scripts/blobpack.py emit "$OUT_DIR" "$WORK/keys.txt"
+elif [ "$FORMAT" = "pack-v1" ]; then
+  # Ask the database we just restored what it references, rather than trusting
+  # keys.txt: that file was queried after the dump was taken, so a hard delete in
+  # between could drop a key the dump still needs. The restored database is the
+  # authority on what this restore requires, and it cannot drift from itself.
+  [ -f "$PACKS/INDEX" ] || { echo "pack index not found at $PACKS/INDEX" >&2; exit 1; }
+  docker exec "$PG_CONTAINER" psql -U "$PGUSER" -d "$DB" -tA -c \
+    "select distinct content_key from (
+       select content_key from documents where content_key is not null and content_key <> ''
+       union all
+       select content_key from document_revisions where content_key is not null and content_key <> ''
+     ) k order by 1" > "$WORK/restore-keys.txt"
+  echo "     pack format — $(wc -l < "$WORK/restore-keys.txt" | tr -d ' ') keys from $PACKS"
+  # blobpack verifies every key is present and hash-correct before it writes
+  # anything, and fails if it wrote fewer than asked.
+  S3_BUCKET="$BUCKET" uv run --quiet scripts/blobpack.py emit "$PACKS" "$WORK/restore-keys.txt"
 
 elif [ -f "$WORK/keys.txt" ]; then
   # pool-v2: verify the pool can satisfy this snapshot BEFORE touching the

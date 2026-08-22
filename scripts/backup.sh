@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Produce a tracker backup: a small per-run snapshot (Postgres dump + the list
-# of content keys it references) plus a shared, append-only blob pool.
+# of content keys it references) plus a shared, append-only set of blob packs.
 #
 #   scripts/backup.sh                 # -> ./backups/tracker-backup-<ts>.tar.gz
 #   scripts/backup.sh --upload        # also push to BACKUP_S3_* (R2/S3)
@@ -74,31 +74,40 @@ fi
 echo "1/5  pg_dump ($PGDATABASE)"
 docker exec "$PG_CONTAINER" pg_dump -U "$PGUSER" -d "$PGDATABASE" -Fc > "$WORK/db.dump"
 
-# 2) Fold new blobs into the packs. Runs AFTER the dump: writes are blob-first,
-#    so every content_key the dump references already exists in the store by the
-#    time the dump was taken. Folding after can only add extra blobs, never miss
-#    a referenced one. Sealed packs are never reopened, so this costs O(new).
+# 2) Fold new blobs into the packs, enumerating the CONTENT STORE, not the
+#    database. Deriving the fold set from a query is a race: a hard delete
+#    committing between the dump above and that query removes the key from the
+#    query's result while the dump still references the document, so the blob is
+#    never packed and the restore silently produces a document with no content.
+#    The store is immutable and append-only, so folding a superset is at worst
+#    wasteful. Blobs are written before the rows that reference them, so anything
+#    the dump names is already in the store by the time we list it.
 echo "2/5  fold blobs into packs"
+uv run --quiet scripts/blobpack.py fold "$PACKS" --all
+
+# keys.txt records what this snapshot referenced, for the manifest and for
+# operators reading the archive. It is NOT the restore key set: restore.sh
+# derives that from the database it actually restored, which cannot drift.
 docker exec "$PG_CONTAINER" psql -U "$PGUSER" -d "$PGDATABASE" -tA -c \
   "select distinct content_key from (
      select content_key from documents where content_key is not null and content_key <> ''
      union all
      select content_key from document_revisions where content_key is not null and content_key <> ''
    ) k order by 1" > "$WORK/keys.txt"
-uv run --quiet scripts/blobpack.py fold "$OUT_DIR" < "$WORK/keys.txt"
 
 # 3) A snapshot the packs cannot serve is not a backup. The index is the record
 #    of which pack holds what, so confirm every key this snapshot needs is in it.
 echo "3/5  check packs cover this snapshot"
-uv run --quiet - "$OUT_DIR" "$WORK/keys.txt" <<'PYEOF'
+uv run --quiet - "$PACKS" "$WORK/keys.txt" <<'PYEOF'
 import sys, os, hashlib
-work, keyfile = sys.argv[1], sys.argv[2]
-idx_path = os.path.join(work, "packs", "INDEX")
-raw = open(idx_path, "rb").read()
-want = open(idx_path + ".sha256").read().split()[0]
-if hashlib.sha256(raw).hexdigest() != want:
+packs, keyfile = sys.argv[1], sys.argv[2]
+raw = open(os.path.join(packs, "INDEX"), "rb").read().decode()
+first, _, body = raw.partition("\n")
+if not first.startswith("#blobpack-index-v2"):
+    sys.exit("INDEX is not the self-checking v2 format — run `blobpack.py reindex`")
+if hashlib.sha256(body.encode()).hexdigest() != first.split("sha256=", 1)[1].strip():
     sys.exit("INDEX checksum mismatch — refusing to write a snapshot against it")
-held = {l.split(" ", 1)[0] for l in raw.decode().splitlines() if l.strip()}
+held = {l.split(" ", 1)[0] for l in body.splitlines() if l.strip()}
 need = {l.strip() for l in open(keyfile) if l.strip()}
 absent = need - held
 if absent:
@@ -153,7 +162,7 @@ echo "backup ready: $TAR ($(du -h "$TAR" | cut -f1)) — $DOCS docs, $BLOBS keys
 | documents | $DOCS |
 | content keys | $BLOBS |
 | packs | $PACK_N |
-| snapshot format | pool-v2 (db.dump + keys.txt; blobs live in the pool) |
+| snapshot format | pack-v1 (db.dump + keys.txt; blob bytes live in the packs) |
 | tracker version | $BINVER |
 | image | ghcr.io/chicagobuss/tracker:$BINVER |
 | source | https://github.com/chicagobuss/tracker |
@@ -165,7 +174,7 @@ if [ "$UPLOAD" = 1 ]; then
   echo "uploading to backup store..."
   # The pool first: a snapshot offsite whose blobs are not offsite is not a
   # backup. Incremental, so this is O(new blobs) like the local sync.
-  uv run --quiet scripts/blobpack.py push "$OUT_DIR"
+  uv run --quiet scripts/blobpack.py push "$PACKS"
   uv run --quiet scripts/s3util.py put-archive "$TAR"
 
   uv run --quiet scripts/s3util.py put-archive "$OUT_DIR/RESTORE.md" RESTORE.md

@@ -12,7 +12,7 @@ secret.
   are reading this file you already have them.
 - **Docker**, or a Postgres 17 (with pgvector) and somewhere S3-compatible to
   put blobs.
-- Disk for the database dump plus the blob pool (sizes in the facts above).
+- Disk for the database dump plus the blob packs (sizes in the facts above).
 
 The tracker image and source are both public — no GitHub account required:
 
@@ -23,7 +23,7 @@ The tracker image and source are both public — no GitHub account required:
 
     <prefix>/tracker-backup-<timestamp>.tar.gz   point-in-time snapshots
     <prefix>/packs/blobs-<YYYYMMDD>-NNN.tar      content blobs, shared by all snapshots
-    <prefix>/packs/INDEX                         which pack holds which blob (+ .sha256)
+    <prefix>/packs/INDEX                         which pack holds which blob (self-checking)
     <prefix>/RESTORE.md                          this file
 
 A snapshot is small and contains no blob bytes:
@@ -35,6 +35,12 @@ A snapshot is small and contains no blob bytes:
 Blobs are immutable and named by their own sha256, so the packs serve every
 snapshot. **A snapshot alone is not a restore — you need the packs too.** A pack
 for a past day is sealed and never changes; only the current day's is rewritten.
+
+If `INDEX` is lost or unreadable, it can be rebuilt from the packs themselves —
+every member is named by its own sha256, so the mapping is recoverable:
+
+    scripts/blobpack.py reindex ./backups/packs
+
 
 Older layouts still restore: snapshots that reference `<prefix>/pool/sha256/...`
 (per-file blobs) or that embed their own `blobs/` directory are detected
@@ -50,7 +56,7 @@ Set in `.env`: `BACKUP_S3_ENDPOINT`, `BACKUP_S3_BUCKET`, `BACKUP_S3_PREFIX`,
 `S3_*` (or `STORAGE_TYPE=file`) for wherever blobs should now live.
 
     scripts/s3util.py list-archives                    # pick a snapshot
-    scripts/blobpack.py pull ./backups                 # fetch the packs
+    scripts/blobpack.py pull ./backups/packs           # fetch the packs
     scripts/restore.sh --from-s3 tracker-backup-<ts>.tar.gz
 
 Then start the service with `.env` pointing at that database and blob store.

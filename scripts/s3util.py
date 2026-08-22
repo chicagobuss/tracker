@@ -87,12 +87,102 @@ def list_archives():
             print(f"  {o['Key']}  {o['Size']} bytes  {o['LastModified']:%Y-%m-%d %H:%M}")
 
 
+
+
+# --- blob pool: read side only, for restoring pre-pack snapshots -------------
+# Packs replaced the per-file pool for NEW backups, but snapshots written in the
+# pool era stay restorable for as long as they are retained. Deleting these
+# commands while restore.sh still called them left `verify-pool` and
+# `upload-from-pool` as "unknown command" — the compatibility promise in that
+# script's header was not actually kept.
+#
+# The write side is deliberately gone: nothing creates or garbage-collects a
+# pool any more, so `sync-pool`, `push-pool` and `gc-pool` would only invite
+# writing to a store that is no longer the source of truth.
+
+def _pool_path(pool, key):
+    return os.path.join(pool, key)
+
+def verify_pool(pool, keys_file, deep=False):
+    """Every key a snapshot needs must be present; optionally hash-check bytes.
+
+    Presence is a stat per key and stays cheap at any scale, so it runs on every
+    backup. Hashing reads every byte in the pool, which is O(total bytes) — the
+    very shape this design exists to avoid — so it is opt-in (`--deep`) for a
+    periodic integrity sweep, and always on during a restore, where correctness
+    matters more than speed and the cost is paid once.
+    """
+    keys = [k.strip() for k in open(keys_file) if k.strip()]
+    missing, corrupt = [], []
+    for k in keys:
+        p = _pool_path(pool, k)
+        if not os.path.exists(p):
+            missing.append(k)
+            continue
+        if deep and k.startswith("sha256/"):
+            h = hashlib.sha256(open(p, "rb").read()).hexdigest()
+            if h != k.split("/", 1)[1]:
+                corrupt.append(k)
+    if missing or corrupt:
+        for k in missing[:10]:
+            print(f"  MISSING {k}")
+        for k in corrupt[:10]:
+            print(f"  CORRUPT {k}")
+        sys.exit(f"pool verify FAILED: {len(missing)} missing, {len(corrupt)} corrupt of {len(keys)}")
+    print(f"pool verify OK: {len(keys)} keys present" + (" and hash-correct" if deep else ""))
+
+def upload_from_pool(pool, keys_file):
+    """Restore path: push exactly the keys a snapshot references.
+
+    Hash-checks each blob on the way out. A restore is where a silently corrupt
+    pool would become permanent, so it is the one place worth the full read.
+    """
+    s3, b = content_client(), os.environ["S3_BUCKET"]
+    ensure_bucket(s3, b)
+    keys = [k.strip() for k in open(keys_file) if k.strip()]
+    for k in keys:
+        p = _pool_path(pool, k)
+        if not os.path.exists(p):
+            sys.exit(f"pool is missing {k} — refusing a partial restore")
+        if k.startswith("sha256/"):
+            h = hashlib.sha256(open(p, "rb").read()).hexdigest()
+            if h != k.split("/", 1)[1]:
+                sys.exit(f"pool blob {k} does not match its own hash — refusing to restore corruption")
+        s3.upload_file(p, b, k)
+    print(f"uploaded {len(keys)} blobs from pool to {b}")
+
+def _pool_prefix():
+    base = os.environ.get("BACKUP_S3_PREFIX", "").strip("/")
+    return (base + "/pool/").lstrip("/")
+
+def pull_pool(pool):
+    """Disaster recovery: rebuild a local pool from the backup store."""
+    s3, b = backup_client(), os.environ["BACKUP_S3_BUCKET"]
+    pre = _pool_prefix()
+    todo = []
+    for page in s3.get_paginator("list_objects_v2").paginate(Bucket=b, Prefix=pre):
+        for o in page.get("Contents", []):
+            rel = o["Key"][len(pre):]
+            dst = os.path.join(pool, rel)
+            if not os.path.exists(dst):
+                todo.append((o["Key"], dst))
+    for _, dst in todo:
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+    if todo:
+        with ThreadPoolExecutor(max_workers=int(os.environ.get("BACKUP_PARALLEL", "16"))) as ex:
+            list(ex.map(lambda t: s3.download_file(b, t[0], t[1]), todo))
+    print(f"pool pull: {len(todo)} blobs fetched into {pool}")
+
+
 CMDS = {
     "download-blobs": lambda a: download_blobs(a[0]),
     "upload-blobs": lambda a: upload_blobs(a[0]),
     "put-archive": lambda a: put_archive(a[0], a[1] if len(a) > 1 else None),
     "get-archive": lambda a: get_archive(a[0], a[1]),
     "list-archives": lambda a: list_archives(),
+    "verify-pool": lambda a: verify_pool(a[0], a[1], "--deep" in a),
+    "upload-from-pool": lambda a: upload_from_pool(a[0], a[1]),
+    "pull-pool": lambda a: pull_pool(a[0]),
 }
 
 if __name__ == "__main__":
