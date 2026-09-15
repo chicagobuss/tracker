@@ -74,8 +74,9 @@ func writeErr(w http.ResponseWriter, err error) {
 	}
 }
 
-// auth wraps a handler with bearer-token checking. If no tokens are configured
-// (API_TOKENS empty), auth is disabled (dev only).
+// auth wraps a handler with the configured admission check. Bearer tokens take
+// precedence when present. Without them, REQUIRE_ACTOR accepts any nonblank
+// X-Actor value; this is attribution on a trusted network, not authentication.
 func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ws, confined := s.cfg.DefaultWorkspace, false
@@ -100,8 +101,15 @@ func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
 			} else if sel := workspaceSelector(r); sel != "" {
 				ws = sel
 			}
-		} else if sel := workspaceSelector(r); sel != "" {
-			ws = sel
+		} else {
+			if s.cfg.RequireActor && strings.TrimSpace(r.Header.Get("X-Actor")) == "" {
+				writeError(w, http.StatusBadRequest, "actor_required",
+					"X-Actor header required (the entity making this request)", nil)
+				return
+			}
+			if sel := workspaceSelector(r); sel != "" {
+				ws = sel
+			}
 		}
 		if !validWorkspace(ws) {
 			writeError(w, http.StatusBadRequest, "bad_workspace", ErrBadWorkspace.Error(),

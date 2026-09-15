@@ -67,6 +67,7 @@ Common knobs, all in `.env`:
 | Let other machines reach it | `BIND_ADDR=<your LAN/Tailscale IP>` |
 | Keep blobs in S3/R2/MinIO instead of files | `STORAGE_TYPE=s3` + the four required `S3_*` vars |
 | Gate access behind a token | Set `API_TOKENS` to a token generated with `openssl rand -hex 32` |
+| Require attribution on a trusted network without tokens | `REQUIRE_ACTOR=true` |
 
 ### Identity vs. access
 
@@ -78,11 +79,23 @@ Two different things, easy to conflate:
   between cooperating agents, not a security boundary.
 - **`API_TOKENS`** is *whether you may talk to the server at all*. It is **empty by
   default, meaning no auth** — anyone who can reach the port can read and write.
+- **`REQUIRE_ACTOR=true`** is an actor-only admission mode for trusted private
+  networks. With `API_TOKENS` empty, every API and MCP request must carry some
+  nonblank `X-Actor`; the value remains self-asserted and is not authentication.
 
 So `X-Actor` is not a login, and running without `API_TOKENS` is fine on loopback
 or a private overlay network — but it is the only thing standing between an open
 port and an unauthenticated write API. Turn it on before you expose tracker
 anywhere you don't fully trust.
+
+For a trusted private overlay where reachability is the security boundary, use:
+
+```bash
+API_TOKENS=
+REQUIRE_ACTOR=true
+```
+
+Health checks, static UI assets, and signed blob URLs do not require an actor.
 
 ## Enabling auth (optional)
 
