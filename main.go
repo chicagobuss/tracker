@@ -41,6 +41,22 @@ func blobSigOK(cfg Config, r *http.Request) bool {
 	return hmac.Equal([]byte(want), []byte(r.URL.Query().Get("s")))
 }
 
+// blobAdmissionOK applies the same admission-mode precedence as Server.auth,
+// while preserving signed content URLs as short-lived capabilities. A bearer
+// deployment does not accept a self-asserted actor in place of its token.
+func blobAdmissionOK(cfg Config, r *http.Request) bool {
+	if blobSigOK(cfg, r) {
+		return true
+	}
+	if len(cfg.APITokens) > 0 {
+		return bearerOK(cfg, r)
+	}
+	if cfg.RequireActor {
+		return strings.TrimSpace(r.Header.Get("X-Actor")) != ""
+	}
+	return true
+}
+
 //go:embed openapi.yaml
 var openapiSpec []byte
 
@@ -147,10 +163,9 @@ Usage:
 			http.NotFound(w, r)
 			return
 		}
-		// When auth is enabled, a blob URL must carry a live HMAC signature
-		// (the expiring content_url) or the caller a valid bearer token —
-		// otherwise every doc would be world-readable by hash forever.
-		if len(cfg.APITokens) > 0 && !bearerOK(cfg, r) && !blobSigOK(cfg, r) {
+		// A blob follows the configured admission mode, while a live HMAC
+		// signature remains sufficient for an expiring content_url.
+		if !blobAdmissionOK(cfg, r) {
 			http.Error(w, `{"error":{"code":"unauthorized","message":"expired or missing blob signature"}}`, http.StatusUnauthorized)
 			return
 		}

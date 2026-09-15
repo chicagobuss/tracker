@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -49,6 +50,60 @@ func TestAuth_ActorOnlyRejectsMissingOrBlankActor(t *testing.T) {
 	}
 	if handlerCalled {
 		t.Fatal("wrapped handler called without an actor")
+	}
+}
+
+func TestBlobAdmissionMatchesConfiguredAuthMode(t *testing.T) {
+	key := []byte("01234567890123456789012345678901")
+	exp := time.Now().Add(time.Minute).Unix()
+	signedPath := "/blobs/sha256/test?e=" + strconv.FormatInt(exp, 10) +
+		"&s=" + blobSig(key, "sha256/test", exp)
+
+	tests := []struct {
+		name          string
+		cfg           Config
+		target        string
+		actor         string
+		authorization string
+		want          bool
+	}{
+		{name: "auth disabled", cfg: Config{}, target: "/blobs/sha256/test", want: true},
+		{name: "actor-only rejects missing actor", cfg: Config{RequireActor: true, BlobSigningKey: key}, target: "/blobs/sha256/test"},
+		{name: "actor-only rejects blank actor", cfg: Config{RequireActor: true, BlobSigningKey: key}, target: "/blobs/sha256/test", actor: " \t"},
+		{name: "actor-only accepts actor", cfg: Config{RequireActor: true, BlobSigningKey: key}, target: "/blobs/sha256/test", actor: "browser", want: true},
+		{name: "actor-only accepts live signature", cfg: Config{RequireActor: true, BlobSigningKey: key}, target: signedPath, want: true},
+		{name: "actor-only rejects forged signature", cfg: Config{RequireActor: true, BlobSigningKey: key}, target: "/blobs/sha256/test?e=1&s=forged"},
+		{name: "token mode rejects actor alone", cfg: Config{APITokens: map[string]string{"secret": ""}, RequireActor: true, BlobSigningKey: key}, target: "/blobs/sha256/test", actor: "browser"},
+		{name: "token mode accepts bearer", cfg: Config{APITokens: map[string]string{"secret": ""}, BlobSigningKey: key}, target: "/blobs/sha256/test", authorization: "Bearer secret", want: true},
+		{name: "token mode accepts live signature", cfg: Config{APITokens: map[string]string{"secret": ""}, BlobSigningKey: key}, target: signedPath, want: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, tc.target, nil)
+			r.Header.Set("X-Actor", tc.actor)
+			r.Header.Set("Authorization", tc.authorization)
+			if got := blobAdmissionOK(tc.cfg, r); got != tc.want {
+				t.Fatalf("blobAdmissionOK() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWebUISendsConfiguredActor(t *testing.T) {
+	index, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web UI: %v", err)
+	}
+	page := string(index)
+	for _, want := range []string{
+		`id="actor"`,
+		`localStorage.getItem("tracker_actor")`,
+		`h["X-Actor"] = actor`,
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("web UI missing %q", want)
+		}
 	}
 }
 

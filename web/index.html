@@ -48,6 +48,7 @@
   header select:focus, header input:focus { outline:none; border-color:var(--accent); }
   header select option { background:var(--panel); color:var(--fg); }
   #q { flex:1; }
+  #actor { width:140px; }
   #token { width:170px; }
   button { background:var(--btn-bg); color:var(--fg); border:1px solid var(--border); border-radius:6px; padding:.35rem .6rem; cursor:pointer; }
   button:hover { background:var(--btn-hover-bg); }
@@ -245,6 +246,7 @@
   </div>
   <select id="workspace" title="Switch workspace"></select>
   <input id="q" placeholder="search…" autocomplete="off">
+  <input id="actor" placeholder="actor ID" autocomplete="off">
   <input id="token" placeholder="bearer token (if set)" autocomplete="off">
   <button id="help">? help</button>
   <button id="theme-toggle" title="Toggle theme">☀️</button>
@@ -279,6 +281,17 @@
 </main>
 <script>
 const $ = s => document.querySelector(s);
+const actorBox = $("#actor");
+actorBox.value = localStorage.getItem("tracker_actor") || "";
+actorBox.addEventListener("change", async () => {
+  localStorage.setItem("tracker_actor", actorBox.value.trim());
+  await loadWorkspaces();
+  loadList();
+  if (active) openDoc(active);
+  else if (activeFolio) openFolio(activeFolio);
+  else showHelp();
+});
+
 const tokenBox = $("#token");
 tokenBox.value = localStorage.getItem("tracker_token") || "";
 tokenBox.addEventListener("change", async () => {
@@ -295,6 +308,8 @@ let currentWorkspace = new URLSearchParams(location.search).get("workspace") || 
 
 function headers() {
   const h = {};
+  const actor = actorBox.value.trim();
+  if (actor) h["X-Actor"] = actor;
   const t = tokenBox.value.trim();
   if (t) h["Authorization"] = "Bearer " + t;
   const ws = (workspaceSelect && workspaceSelect.value) ? workspaceSelect.value.trim() : (currentWorkspace || "");
@@ -321,9 +336,8 @@ async function loadWorkspaces() {
     res = await api("/workspaces");
   } catch (e) {
     try {
-      const h = {};
-      const t = tokenBox.value.trim();
-      if (t) h["Authorization"] = "Bearer " + t;
+      const h = headers();
+      delete h["X-Workspace"];
       const r = await fetch("/workspaces", { headers: h });
       if (r.ok) res = r;
     } catch {}
