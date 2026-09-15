@@ -26,6 +26,32 @@ func TestWriteErr_AlreadyExists(t *testing.T) {
 	}
 }
 
+func TestAuth_ActorOnlyRejectsMissingOrBlankActor(t *testing.T) {
+	srv := &Server{cfg: Config{RequireActor: true, DefaultWorkspace: "default"}}
+	handlerCalled := false
+	h := srv.auth(func(w http.ResponseWriter, r *http.Request) {
+		handlerCalled = true
+	})
+
+	for _, actor := range []string{"", "  \t "} {
+		t.Run("actor="+actor, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			r := httptest.NewRequest(http.MethodGet, "/docs", nil)
+			r.Header.Set("X-Actor", actor)
+			h(w, r)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d (body %s)", w.Code, http.StatusBadRequest, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), `"code":"actor_required"`) {
+				t.Fatalf("body = %s, want actor_required", w.Body.String())
+			}
+		})
+	}
+	if handlerCalled {
+		t.Fatal("wrapped handler called without an actor")
+	}
+}
+
 func TestNormalizeCreateError_UniqueViolation(t *testing.T) {
 	err := normalizeCreateError(&pgconn.PgError{Code: "23505"})
 	if !errors.Is(err, ErrAlreadyExists) {

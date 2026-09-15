@@ -186,6 +186,8 @@ Usage:
 	authState := "DISABLED (no API_TOKENS)"
 	if len(cfg.APITokens) > 0 {
 		authState = "enabled"
+	} else if cfg.RequireActor {
+		authState = "actor-only"
 	}
 
 	// Report the backend actually in use — printing a bucket name while serving

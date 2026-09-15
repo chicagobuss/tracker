@@ -41,7 +41,7 @@ servers:
 
 security:
   - bearerAuth: []
-  - {} # auth is disabled when API_TOKENS is unset
+  - {} # API_TOKENS may be unset; REQUIRE_ACTOR can still require X-Actor
 
 components:
   securitySchemes:

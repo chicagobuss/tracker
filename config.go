@@ -16,6 +16,10 @@ type Config struct {
 	// auth disabled (dev only). A "" value means the token is unscoped and the
 	// caller picks its workspace with X-Workspace.
 	APITokens map[string]string
+	// RequireActor makes X-Actor the sole admission check when bearer auth is
+	// disabled. The value is still self-asserted; deploy this only behind a
+	// trusted network boundary.
+	RequireActor bool
 
 	// DefaultWorkspace is used when neither the token nor X-Workspace names one,
 	// which is what keeps pre-workspace agents working unchanged.
@@ -43,12 +47,13 @@ func loadConfig() Config {
 		BaseURL:     env("BASE_URL", "http://127.0.0.1:8770"),
 		// No S3 defaults on purpose: a half-configured S3 backend should fail
 		// with "S3_ENDPOINT is not set", not by dialing someone else's host.
-		S3Endpoint:  env("S3_ENDPOINT", ""),
-		S3AccessKey: env("S3_ACCESS_KEY", ""),
-		S3SecretKey: env("S3_SECRET_KEY", ""),
-		S3Bucket:    env("S3_BUCKET", ""),
-		S3UseSSL:    env("S3_USE_SSL", "false") == "true",
-		APITokens:   map[string]string{},
+		S3Endpoint:   env("S3_ENDPOINT", ""),
+		S3AccessKey:  env("S3_ACCESS_KEY", ""),
+		S3SecretKey:  env("S3_SECRET_KEY", ""),
+		S3Bucket:     env("S3_BUCKET", ""),
+		S3UseSSL:     env("S3_USE_SSL", "false") == "true",
+		APITokens:    map[string]string{},
+		RequireActor: env("REQUIRE_ACTOR", "false") == "true",
 
 		DefaultWorkspace: env("DEFAULT_WORKSPACE", "default"),
 	}
