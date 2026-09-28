@@ -396,7 +396,8 @@ function human(n) { n = +n || 0; return n < 1024 ? n + " B" : (n / 1024).toFixed
 
 // --- routing -----------------------------------------------------------------
 // The URL mirrors what you're looking at, so a view can be shared or reopened on
-// another machine: #/doc/<slug> and #/folio/<slug>. Slugs, not UUIDs — a UUID in
+// another machine: #/doc/<slug>, #/doc/<slug>?v=<version> (a past version) and
+// #/folio/<slug>. Slugs, not UUIDs — a UUID in
 // a URL tells a human nothing. Hash-based because the SPA is only served at "/",
 // so a real path would 404 on reload.
 //
@@ -415,7 +416,7 @@ function setRoute(hash) {
 
 // Drive the UI from the URL: on first load, and on back/forward.
 async function applyRoute() {
-  const m = /^#\/(doc|folio)\/(.+)$/.exec(location.hash);
+  const m = /^#\/(doc|folio)\/([^?]+)(?:\?v=(\d+))?$/.exec(location.hash);
   if (!m) {
     scope = "all"; $("#scope-all").checked = true;
     active = activeSlug = activeFolio = null;
@@ -423,7 +424,7 @@ async function applyRoute() {
     showHelp();
     return;
   }
-  const [, kind, rawSlug] = m;
+  const [, kind, rawSlug, v] = m;
   const slug = decSlug(rawSlug);
   if (kind === "folio") {
     scope = "folios"; $("#scope-folios").checked = true;
@@ -439,7 +440,7 @@ async function applyRoute() {
     scope = "all"; $("#scope-all").checked = true;
     activeFolio = null;
   }
-  openDoc(slug);
+  openDoc(slug, v ? +v : null);
 }
 // popstate covers back/forward and fresh loads; hashchange covers a link pasted
 // into the URL bar of an already-open tab. setRoute's no-op guard keeps the two
@@ -765,14 +766,16 @@ async function openFolio(slug) {
 // Takes a UUID (from a click) or a slug (from a URL) — the API resolves either.
 // We fetch first so we always learn the canonical slug, which is what the URL and
 // the list highlighting are keyed on.
-async function openDoc(idOrSlug) {
+// version: show that past version in place of the latest (a deep link to one
+// revision, e.g. a single agent turn in a fleet pane's history).
+async function openDoc(idOrSlug, version = null) {
   const view = $("#view");
   try {
     const { document: d, lock: lk } = await (await api("/docs/" + encSlug(idOrSlug))).json();
     const id = d.id;
     active = d.id;
     activeSlug = d.slug;
-    setRoute("#/doc/" + encSlug(d.slug));
+    setRoute("#/doc/" + encSlug(d.slug) + (version ? "?v=" + version : ""));
     loadList();
     let body = "";
     if (d.content_key) {
@@ -797,6 +800,7 @@ async function openDoc(idOrSlug) {
       </div><div id="histpanel"></div><div id="docbody">${body}</div>`;
     const hb = $("#histbtn");
     if (hb) hb.onclick = () => toggleHistory(id);
+    if (version && version !== d.version) viewRevision(id, version, d.version);
   } catch (e) {
     view.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
     // A shared link can point at a doc that's gone (or that you can't read without
@@ -831,6 +835,7 @@ async function viewRevision(id, version, total, el) {
   panel.querySelectorAll(".lrow").forEach(x => x.classList.remove("active"));
   if (el) el.classList.add("active");
   const bodyEl = $("#docbody");
+  if (activeSlug) setRoute("#/doc/" + encSlug(activeSlug) + "?v=" + version);
   try {
     const raw = await (await api(`/docs/${id}/revisions/${version}/raw`)).text();
     bodyEl.innerHTML = `<div class="oldbanner">Viewing <strong>v${version}</strong> of ${total} `
