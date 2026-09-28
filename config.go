@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -37,6 +38,13 @@ type Config struct {
 	S3SecretKey string
 	S3Bucket    string
 	S3UseSSL    bool
+
+	// Blob compaction (compact.go): off | manual | auto.
+	Compaction      string
+	CompactAfter    time.Duration // a blob is packed once it is this old
+	CompactGrace    time.Duration // a packed blob's loose copy is deleted after this
+	CompactBatch    int           // blobs per step
+	CompactInterval time.Duration // pause between steps when there is nothing to do
 }
 
 func loadConfig() Config {
@@ -56,6 +64,15 @@ func loadConfig() Config {
 		RequireActor: env("REQUIRE_ACTOR", "false") == "true",
 
 		DefaultWorkspace: env("DEFAULT_WORKSPACE", "default"),
+
+		Compaction: env("COMPACTION", "off"),
+	}
+	c.CompactAfter = durationEnv("COMPACT_AFTER", time.Hour)
+	c.CompactGrace = durationEnv("COMPACT_GRACE", 24*time.Hour)
+	c.CompactInterval = durationEnv("COMPACT_INTERVAL", time.Minute)
+	c.CompactBatch = 200
+	if n, err := strconv.Atoi(env("COMPACT_BATCH", "200")); err == nil && n > 0 {
+		c.CompactBatch = n
 	}
 	c.TaskClaimTTL = time.Hour
 	if d, err := time.ParseDuration(env("TASK_CLAIM_TTL", "1h")); err == nil && d > 0 {
@@ -91,6 +108,11 @@ func loadConfig() Config {
 // Misconfiguration should fail at startup with a readable message rather than as
 // a connection timeout to a half-configured backend.
 func (c Config) validate() error {
+	switch c.Compaction {
+	case "", "off", "manual", "auto":
+	default:
+		return fmt.Errorf("COMPACTION must be off, manual or auto, got %q", c.Compaction)
+	}
 	return c.validateStorage(c.StorageType, c.BlobDir)
 }
 
@@ -122,6 +144,16 @@ func (c Config) validateStorage(storageType, blobDir string) error {
 		return fmt.Errorf("STORAGE_TYPE must be \"file\" or \"s3\", got %q", storageType)
 	}
 	return nil
+}
+
+// compacting reports whether the compactor runs at all.
+func (c Config) compacting() bool { return c.Compaction == "manual" || c.Compaction == "auto" }
+
+func durationEnv(k string, def time.Duration) time.Duration {
+	if d, err := time.ParseDuration(env(k, "")); err == nil && d >= 0 {
+		return d
+	}
+	return def
 }
 
 func env(k, def string) string {

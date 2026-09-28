@@ -518,6 +518,58 @@ each against its hash, and writes it to the destination. It is **non-destructive
 step — set `STORAGE_TYPE` (and `BLOB_DIR` for file) in `.env` and restart — so the
 switch is deliberate and reversible.
 
+## Blob compaction
+
+Every revision is kept, one object (or file) per blob. Most blobs are small,
+and many are near-copies of the previous revision of the same document, so on
+disk they cost several times their size. On one real store, 44.7 MB of content
+took 116 MB on a ZFS pool. With compaction on, tracker packs cold blobs in the
+background, through the same backend, so files and S3 work the same way:
+
+- Each blob is stored as the smallest of: its raw bytes; zstd with a
+  dictionary trained on the store's own blobs; or zstd with the document's
+  previous revision as the dictionary (a delta). Delta chains are capped at 16
+  revisions, after which a blob is stored standalone again, like a keyframe in
+  video.
+- Packs are content-addressed (`packs/<sha256>`). Every member is decoded and
+  checked before a pack is written, and the pack is read back before anything
+  points at it.
+- Reads look for a packed copy first, verify it against its sha256 key, and
+  fall back to the loose copy. Clients see no change: `content_url` still works.
+- The loose copy is deleted after `COMPACT_GRACE`, and only if its packed copy
+  still decodes and verifies at that moment.
+
+On the store above, best-of encoding brings the content to about 12.8 MB
+(3.5x), in a few hundred packs instead of 15.7k files.
+
+```bash
+# .env
+COMPACTION=manual        # off (default) | manual | auto
+COMPACT_AFTER=1h         # pack a blob once it is this old
+COMPACT_GRACE=24h        # then delete its loose copy after this
+COMPACT_BATCH=200        # blobs per step
+```
+
+In `manual` mode nothing is packed until you grant a budget, so the first
+backfill of an existing store happens in steps you choose. Once you trust it,
+switch to `auto`, which packs everything older than `COMPACT_AFTER`
+continuously. With `API_TOKENS` set, these endpoints need a token that isn't
+confined to a workspace:
+
+```bash
+curl -s $T/admin/compaction                           # state, backlog, ratio, last step
+curl -s -X POST "$T/admin/compaction/run?blobs=500"   # manual: allow 500 more blobs
+curl -s -X POST $T/admin/compaction/pause             # stop packing and reclaiming (persists)
+curl -s -X POST $T/admin/compaction/resume
+curl -s -X POST $T/admin/compaction/stop              # drop the remaining budget
+```
+
+`GET /metrics` exposes the same numbers in Prometheus format
+(`tracker_compaction_*`, `tracker_blob_reads_total{source=loose|pack|fallback}`).
+It needs a bearer token when `API_TOKENS` is set. Backups (`scripts/backup.sh`)
+include packs and dictionaries in place of loose copies that have been deleted.
+`migrate-blobs` carries them across backends.
+
 ## Status & roadmap
 
 Running in "production" (lol) and used heavily for months. Recently landed: CI
@@ -528,9 +580,9 @@ task-claim state machines.
 
 ### Hardening
 
-  - Request logging / metrics — only startup/shutdown logs exist today; add
-    access-log middleware (method, path, status, duration, actor), plus counters
-    for writes and lease conflicts.
+  - Request logging / metrics — `/metrics` exists (blob reads and compaction);
+    add access-log middleware (method, path, status, duration, actor), plus
+    counters for writes and lease conflicts.
 
   - Auth hardening — use constant-time bearer-token comparison; implement
     actor↔token binding so a token pins which X-Actor it may assert.

@@ -70,6 +70,26 @@ if [ "$IF_CHANGED" = 1 ] && [ -f "$CHECK_FILE" ] && [ "$STATE" = "$(cat "$CHECK_
   exit 0
 fi
 
+# Blob keys a snapshot of database $1 needs. After compaction, a blob whose
+# loose copy was reclaimed exists only inside a pack, so the snapshot needs the
+# packs and dictionaries (named by their own sha256, like content blobs) in
+# place of that key. Databases from before compaction have no such tables.
+blob_keys_sql() {
+  local refs="select content_key from documents where content_key is not null and content_key <> ''
+     union all
+     select content_key from document_revisions where content_key is not null and content_key <> ''"
+  if [ "$(docker exec "$PG_CONTAINER" psql -U "$PGUSER" -d "$1" -tAc "select to_regclass('public.blob_locations') is not null")" = t ]; then
+    echo "select k from (
+       select distinct content_key k from ($refs) r
+       where not exists (select 1 from blob_locations l where l.content_key = r.content_key and l.loose_deleted_at is not null)
+       union select key from blob_packs
+       union select key from blob_dicts
+     ) x order by 1"
+  else
+    echo "select distinct content_key from ($refs) k order by 1"
+  fi
+}
+
 # 1) Postgres dump FIRST (so every content_key it references already has a blob,
 #    since writes are blob-first). Custom format for flexible pg_restore.
 echo "1/5  pg_dump ($PGDATABASE)"
@@ -82,12 +102,7 @@ docker exec "$PG_CONTAINER" pg_dump -U "$PGUSER" -d "$PGDATABASE" -Fc > "$WORK/d
 # already in the store when the fold lists it. Queried after the fold, a write
 # landing in between named a blob the fold never saw, and coverage aborted the
 # backup whenever agents were writing during a run.
-docker exec "$PG_CONTAINER" psql -U "$PGUSER" -d "$PGDATABASE" -tA -c \
-  "select distinct content_key from (
-     select content_key from documents where content_key is not null and content_key <> ''
-     union all
-     select content_key from document_revisions where content_key is not null and content_key <> ''
-   ) k order by 1" > "$WORK/keys.txt"
+docker exec "$PG_CONTAINER" psql -U "$PGUSER" -d "$PGDATABASE" -tA -c "$(blob_keys_sql "$PGDATABASE")" > "$WORK/keys.txt"
 
 # 2) Fold new blobs into the packs, enumerating the CONTENT STORE, not the
 #    database. Deriving the fold set from a query is a race: a hard delete

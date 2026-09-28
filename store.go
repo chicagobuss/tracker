@@ -107,6 +107,10 @@ type Event struct {
 type BlobStore interface {
 	PutObject(ctx context.Context, key string, data []byte, contentType string) error
 	GetObject(ctx context.Context, key string) (io.ReadCloser, error)
+	// GetRange reads n bytes at off: one member of a compaction pack.
+	GetRange(ctx context.Context, key string, off, n int64) ([]byte, error)
+	// DeleteObject removes an object; a missing one is not an error.
+	DeleteObject(ctx context.Context, key string) error
 	PresignGetObject(ctx context.Context, key string, ttl time.Duration) (string, error)
 }
 
@@ -130,6 +134,30 @@ func (s *S3BlobStore) PutObject(ctx context.Context, key string, data []byte, co
 
 func (s *S3BlobStore) GetObject(ctx context.Context, key string) (io.ReadCloser, error) {
 	return s.client.GetObject(ctx, s.bucket, key, minio.GetObjectOptions{})
+}
+
+func (s *S3BlobStore) GetRange(ctx context.Context, key string, off, n int64) ([]byte, error) {
+	if n == 0 {
+		return []byte{}, nil
+	}
+	opts := minio.GetObjectOptions{}
+	if err := opts.SetRange(off, off+n-1); err != nil {
+		return nil, err
+	}
+	obj, err := s.client.GetObject(ctx, s.bucket, key, opts)
+	if err != nil {
+		return nil, err
+	}
+	defer obj.Close()
+	buf := make([]byte, n)
+	if _, err := io.ReadFull(obj, buf); err != nil {
+		return nil, err
+	}
+	return buf, nil
+}
+
+func (s *S3BlobStore) DeleteObject(ctx context.Context, key string) error {
+	return s.client.RemoveObject(ctx, s.bucket, key, minio.RemoveObjectOptions{})
 }
 
 func (s *S3BlobStore) PresignGetObject(ctx context.Context, key string, ttl time.Duration) (string, error) {
@@ -201,6 +229,26 @@ func (l *LocalBlobStore) PutObject(ctx context.Context, key string, data []byte,
 
 func (l *LocalBlobStore) GetObject(ctx context.Context, key string) (io.ReadCloser, error) {
 	return os.Open(filepath.Join(l.blobDir, key))
+}
+
+func (l *LocalBlobStore) GetRange(ctx context.Context, key string, off, n int64) ([]byte, error) {
+	f, err := os.Open(filepath.Join(l.blobDir, key))
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	buf := make([]byte, n)
+	if _, err := f.ReadAt(buf, off); err != nil && !(errors.Is(err, io.EOF) && n == 0) {
+		return nil, err
+	}
+	return buf, nil
+}
+
+func (l *LocalBlobStore) DeleteObject(ctx context.Context, key string) error {
+	if err := os.Remove(filepath.Join(l.blobDir, key)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 func (l *LocalBlobStore) PresignGetObject(ctx context.Context, key string, ttl time.Duration) (string, error) {
@@ -364,7 +412,9 @@ func openStore(ctx context.Context, cfg Config) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	st := &Store{db: db, blobs: blobs}
+	// Reads go through packedBlobs, which finds blobs the compactor has packed
+	// and falls back to the loose copy otherwise.
+	st := &Store{db: db, blobs: newPackedBlobs(blobs, db)}
 	if err := st.migrate(ctx); err != nil {
 		return nil, err
 	}
@@ -439,6 +489,43 @@ func (s *Store) AllBlobRefs(ctx context.Context) ([]BlobRef, error) {
 			return nil, err
 		}
 		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+// packedRefs is what compaction adds to a full copy of the store: the pack and
+// dictionary objects, and the content keys that now exist only inside packs.
+type packedRefs struct {
+	objects   []BlobRef
+	reclaimed map[string]bool
+}
+
+// PackedBlobRefs lists packs, dictionaries and reclaimed content keys. A
+// database that predates compaction has none.
+func (s *Store) PackedBlobRefs(ctx context.Context) (packedRefs, error) {
+	out := packedRefs{reclaimed: map[string]bool{}}
+	var exists bool
+	if err := s.q(ctx).QueryRow(ctx, `select to_regclass('blob_locations') is not null`).Scan(&exists); err != nil || !exists {
+		return out, err
+	}
+	rows, err := s.q(ctx).Query(ctx, `
+		select key, false from blob_packs union all select key, false from blob_dicts
+		union all select content_key, true from blob_locations where loose_deleted_at is not null`)
+	if err != nil {
+		return out, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k string
+		var reclaimed bool
+		if err := rows.Scan(&k, &reclaimed); err != nil {
+			return out, err
+		}
+		if reclaimed {
+			out.reclaimed[k] = true
+		} else {
+			out.objects = append(out.objects, BlobRef{Key: k, ContentType: "application/octet-stream"})
+		}
 	}
 	return out, rows.Err()
 }

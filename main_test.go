@@ -77,7 +77,9 @@ func testStore(t *testing.T) *Store {
 	// tracker_agent via Scoped, and that role deliberately has no TRUNCATE.
 	// Workspaces are left alone — 'default' is what the rows above hang off.
 	if _, err := db.Exec(ctx,
-		`reset role; truncate documents, doc_locks, document_revisions, tasks, actors, events restart identity cascade`); err != nil {
+		`reset role; truncate documents, doc_locks, document_revisions, tasks, actors, events,
+		  blob_locations, blob_packs, blob_dicts restart identity cascade;
+		 update compaction_control set paused = false, budget = 0`); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
 	return s

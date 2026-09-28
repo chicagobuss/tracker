@@ -589,6 +589,47 @@ paths:
         "403": { description: "workspace_forbidden — the bearer token is confined to another workspace", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
         "404": { description: "unknown workspace", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
 
+  /admin/compaction:
+    get:
+      summary: Blob compaction state
+      description: >
+        Mode, pause and budget, blob counts (referenced, packed, eligible,
+        reclaimed, reclaim_due), bytes before and after packing, per-codec
+        totals, the trained dictionary and the last step that did work. Needs a
+        token that is not confined to a workspace; 409 when COMPACTION=off.
+      responses:
+        "200": { description: compaction state, content: { application/json: { schema: { type: object } } } }
+        "403": { description: "forbidden — the bearer token is confined to a workspace", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        "409": { description: "compaction_off", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+
+  /admin/compaction/{action}:
+    post:
+      summary: Control blob compaction
+      description: >
+        `run?blobs=N` (manual mode) allows N more blobs to be packed; `pause`
+        and `resume` stop and restart packing and reclaiming and survive
+        restarts; `stop` drops the remaining budget. Returns the new state.
+      parameters:
+        - { name: action, in: path, required: true, schema: { type: string, enum: [run, pause, resume, stop] } }
+        - { name: blobs, in: query, schema: { type: integer, minimum: 1 }, description: "run: how many more blobs may be packed" }
+      responses:
+        "200": { description: compaction state after the change, content: { application/json: { schema: { type: object } } } }
+        "400": { $ref: '#/components/responses/BadRequest' }
+        "403": { description: "forbidden — the bearer token is confined to a workspace", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        "409": { description: "compaction_off, or not_manual for run in auto mode", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+
+  /metrics:
+    get:
+      summary: Prometheus metrics
+      description: >
+        Blob reads by source (loose, pack, fallback) and compaction state
+        (`tracker_compaction_*`). Counts and sizes only. Needs a bearer token when
+        API_TOKENS is set.
+      security: []
+      responses:
+        "200": { description: Prometheus text exposition, content: { text/plain: { schema: { type: string } } } }
+        "401": { description: missing or invalid bearer token }
+
   /workspaces:
     get:
       summary: List workspaces (not itself workspace-scoped — this is how an agent discovers where it may work)

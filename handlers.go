@@ -15,8 +15,9 @@ import (
 )
 
 type Server struct {
-	store *Store
-	cfg   Config
+	store     *Store
+	cfg       Config
+	compactor *compactor
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -335,13 +336,13 @@ func (s *Server) docEnvelope(r *http.Request, doc *Document) map[string]any {
 	return resp
 }
 
-// serveBlob streams a content-addressed blob out of the S3 backend. The file
-// backend is served straight off disk by a FileServer instead; this exists so
-// content_url stays rooted at BASE_URL under S3 too, where the bucket endpoint
-// is typically only reachable from tracker's own host.
+// serveBlob streams a content blob for either backend. It goes through the
+// store rather than straight to disk or the bucket because a compacted blob
+// may live inside a pack. Only content keys are served; packs and
+// dictionaries are internal.
 func (s *Server) serveBlob(w http.ResponseWriter, r *http.Request) {
 	key := strings.TrimPrefix(r.URL.Path, "/blobs/")
-	if key == "" {
+	if !contentKeyRe.MatchString(key) {
 		http.NotFound(w, r)
 		return
 	}
@@ -351,8 +352,8 @@ func (s *Server) serveBlob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer rc.Close()
-	// minio.Object is a ReadSeeker, so ServeContent gives us range requests and
-	// content sniffing — matching what the file backend's FileServer already does.
+	// Files, minio objects and unpacked blobs are all ReadSeekers, so ServeContent
+	// gives range requests and content sniffing for every backend.
 	if rs, ok := rc.(io.ReadSeeker); ok {
 		// minio's GetObject is lazy — a missing key surfaces on the first seek or
 		// read, not above. Probe with a seek so an unknown hash 404s here instead

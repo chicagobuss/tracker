@@ -88,6 +88,12 @@ Usage:
 		log.Fatalf("startup: %v", err)
 	}
 	srv := &Server{store: store, cfg: cfg}
+	srv.compactor = newCompactor(store.db, store.blobs.(*packedBlobs), cfg) // openStore always wraps the backend
+	compactCtx, stopCompaction := context.WithCancel(ctx)
+	defer stopCompaction()
+	if cfg.compacting() {
+		go srv.compactor.run(compactCtx)
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", srv.health)
@@ -154,10 +160,13 @@ Usage:
 	mux.HandleFunc("GET /changes", srv.auth(srv.listChanges))
 	mux.HandleFunc("GET /changes/stream", srv.auth(srv.streamChanges))
 
+	mux.HandleFunc("GET /admin/compaction", srv.auth(srv.compactionStatus))
+	mux.HandleFunc("POST /admin/compaction/{action}", srv.auth(srv.compactionControl))
+	mux.HandleFunc("GET /metrics", srv.metrics)
+
 	// Both backends serve content_url from here. PresignGetObject always mints
 	// {BASE_URL}/blobs/..., so an agent never receives a URL that only resolves on
 	// tracker's own host; with S3 the bytes are streamed through from the bucket.
-	fileBlobs := http.StripPrefix("/blobs/", http.FileServer(http.Dir(cfg.BlobDir)))
 	mux.HandleFunc("GET /blobs/", func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/") {
 			http.NotFound(w, r)
@@ -167,10 +176,6 @@ Usage:
 		// signature remains sufficient for an expiring content_url.
 		if !blobAdmissionOK(cfg, r) {
 			http.Error(w, `{"error":{"code":"unauthorized","message":"expired or missing blob signature"}}`, http.StatusUnauthorized)
-			return
-		}
-		if cfg.StorageType == "file" {
-			fileBlobs.ServeHTTP(w, r)
 			return
 		}
 		srv.serveBlob(w, r)
@@ -223,7 +228,7 @@ Usage:
 		}
 		srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 		servers = append(servers, srv)
-		log.Printf("tracker %s listening on %s | storage=%s | auth=%s", appVersion(), addr, storage, authState)
+		log.Printf("tracker %s listening on %s | storage=%s | auth=%s | compaction=%s", appVersion(), addr, storage, authState, cfg.Compaction)
 		go func() {
 			if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 				log.Fatalf("serve %s: %v", addr, err)
@@ -235,6 +240,7 @@ Usage:
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
 	log.Println("shutting down...")
+	stopCompaction()
 	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	for _, srv := range servers {
