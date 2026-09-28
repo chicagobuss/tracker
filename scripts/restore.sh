@@ -20,6 +20,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 set -a; . ./.env; set +a
 
+# Same fallback as backup.sh: cron, ssh and agent shells often start without
+# uv on PATH, and a restore that dies after pg_restore leaves a database whose
+# blobs were never written.
+command -v uv >/dev/null 2>&1 || \
+  PATH="$HOME/.local/bin:$HOME/.cargo/bin:/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:$PATH"
+command -v uv >/dev/null 2>&1 || { echo "uv not found in PATH" >&2; exit 1; }
+
 PG_CONTAINER=${PG_CONTAINER:-tracker-postgres}
 OUT_DIR=${BACKUP_DIR:-./backups}
 PACKS=${BACKUP_PACKS_DIR:-$OUT_DIR/packs}
