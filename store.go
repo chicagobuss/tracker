@@ -159,12 +159,44 @@ func signedBlobURL(baseURL string, signingKey []byte, blobKey string, ttl time.D
 		strings.TrimRight(baseURL, "/"), blobKey, exp, blobSig(signingKey, blobKey, exp))
 }
 
+// PutObject writes the blob to a temp file in the same directory, fsyncs it,
+// then renames it into place and fsyncs the directory. Keys are content hashes,
+// so a torn write under the final name would be a corrupt blob that still looks
+// valid; with rename it appears whole or not at all, and survives a crash.
 func (l *LocalBlobStore) PutObject(ctx context.Context, key string, data []byte, contentType string) error {
 	path := filepath.Join(l.blobDir, key)
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0644)
+	tmp, err := os.CreateTemp(dir, ".put-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name()) // no-op once renamed
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp.Name(), 0644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return err
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 func (l *LocalBlobStore) GetObject(ctx context.Context, key string) (io.ReadCloser, error) {
