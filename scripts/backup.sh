@@ -75,6 +75,20 @@ fi
 echo "1/5  pg_dump ($PGDATABASE)"
 docker exec "$PG_CONTAINER" pg_dump -U "$PGUSER" -d "$PGDATABASE" -Fc > "$WORK/db.dump"
 
+# keys.txt records what this snapshot referenced, for the manifest, the coverage
+# check and operators reading the archive. It is NOT the restore key set:
+# restore.sh derives that from the database it actually restored. Query it
+# BEFORE the fold: writes are blob-first, so every key a committed row names is
+# already in the store when the fold lists it. Queried after the fold, a write
+# landing in between named a blob the fold never saw, and coverage aborted the
+# backup whenever agents were writing during a run.
+docker exec "$PG_CONTAINER" psql -U "$PGUSER" -d "$PGDATABASE" -tA -c \
+  "select distinct content_key from (
+     select content_key from documents where content_key is not null and content_key <> ''
+     union all
+     select content_key from document_revisions where content_key is not null and content_key <> ''
+   ) k order by 1" > "$WORK/keys.txt"
+
 # 2) Fold new blobs into the packs, enumerating the CONTENT STORE, not the
 #    database. Deriving the fold set from a query is a race: a hard delete
 #    committing between the dump above and that query removes the key from the
@@ -85,16 +99,6 @@ docker exec "$PG_CONTAINER" pg_dump -U "$PGUSER" -d "$PGDATABASE" -Fc > "$WORK/d
 #    the dump names is already in the store by the time we list it.
 echo "2/5  fold blobs into packs"
 uv run --quiet scripts/blobpack.py fold "$PACKS" --all
-
-# keys.txt records what this snapshot referenced, for the manifest and for
-# operators reading the archive. It is NOT the restore key set: restore.sh
-# derives that from the database it actually restored, which cannot drift.
-docker exec "$PG_CONTAINER" psql -U "$PGUSER" -d "$PGDATABASE" -tA -c \
-  "select distinct content_key from (
-     select content_key from documents where content_key is not null and content_key <> ''
-     union all
-     select content_key from document_revisions where content_key is not null and content_key <> ''
-   ) k order by 1" > "$WORK/keys.txt"
 
 # 3) A snapshot the packs cannot serve is not a backup. The index is the record
 #    of which pack holds what, so confirm every key this snapshot needs is in it.
