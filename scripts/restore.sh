@@ -28,6 +28,27 @@ command -v uv >/dev/null 2>&1 || \
 command -v uv >/dev/null 2>&1 || { echo "uv not found in PATH" >&2; exit 1; }
 
 PG_CONTAINER=${PG_CONTAINER:-tracker-postgres}
+
+# Blob keys a snapshot of database $1 needs. After compaction, a blob whose
+# loose copy was reclaimed exists only inside a pack, so the snapshot needs the
+# packs and dictionaries (named by their own sha256, like content blobs) in
+# place of that key. Databases from before compaction have no such tables.
+blob_keys_sql() {
+  local refs="select content_key from documents where content_key is not null and content_key <> ''
+     union all
+     select content_key from document_revisions where content_key is not null and content_key <> ''"
+  if [ "$(docker exec "$PG_CONTAINER" psql -U "$PGUSER" -d "$1" -tAc "select to_regclass('public.blob_locations') is not null")" = t ]; then
+    echo "select k from (
+       select distinct content_key k from ($refs) r
+       where not exists (select 1 from blob_locations l where l.content_key = r.content_key and l.loose_deleted_at is not null)
+       union select key from blob_packs
+       union select key from blob_dicts
+     ) x order by 1"
+  else
+    echo "select distinct content_key from ($refs) k order by 1"
+  fi
+}
+
 OUT_DIR=${BACKUP_DIR:-./backups}
 PACKS=${BACKUP_PACKS_DIR:-$OUT_DIR/packs}
 POOL=${BACKUP_POOL_DIR:-$OUT_DIR/pool}
@@ -101,12 +122,7 @@ elif [ "$FORMAT" = "pack-v1" ]; then
   # between could drop a key the dump still needs. The restored database is the
   # authority on what this restore requires, and it cannot drift from itself.
   [ -f "$PACKS/INDEX" ] || { echo "pack index not found at $PACKS/INDEX" >&2; exit 1; }
-  docker exec "$PG_CONTAINER" psql -U "$PGUSER" -d "$DB" -tA -c \
-    "select distinct content_key from (
-       select content_key from documents where content_key is not null and content_key <> ''
-       union all
-       select content_key from document_revisions where content_key is not null and content_key <> ''
-     ) k order by 1" > "$WORK/restore-keys.txt"
+  docker exec "$PG_CONTAINER" psql -U "$PGUSER" -d "$DB" -tA -c "$(blob_keys_sql "$DB")" > "$WORK/restore-keys.txt"
   echo "     pack format — $(wc -l < "$WORK/restore-keys.txt" | tr -d ' ') keys from $PACKS"
   # blobpack verifies every key is present and hash-correct before it writes
   # anything, and fails if it wrote fewer than asked.
@@ -119,12 +135,7 @@ elif [ -f "$WORK/keys.txt" ]; then
   # Same snapshot-consistency rule as pack-v1: keys.txt was queried after the
   # dump, so a hard delete in between can drop a key the dump still references.
   # Ask the database we actually restored instead.
-  docker exec "$PG_CONTAINER" psql -U "$PGUSER" -d "$DB" -tA -c \
-    "select distinct content_key from (
-       select content_key from documents where content_key is not null and content_key <> ''
-       union all
-       select content_key from document_revisions where content_key is not null and content_key <> ''
-     ) k order by 1" > "$WORK/restore-keys.txt"
+  docker exec "$PG_CONTAINER" psql -U "$PGUSER" -d "$DB" -tA -c "$(blob_keys_sql "$DB")" > "$WORK/restore-keys.txt"
   echo "     pool format — $(wc -l < "$WORK/restore-keys.txt" | tr -d ' ') keys from $POOL"
   # --deep on both paths: existence is not correctness, and copying a truncated
   # blob under a sha256 name into the live store is silent, permanent corruption.

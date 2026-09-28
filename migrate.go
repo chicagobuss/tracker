@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"flag"
 	"fmt"
 	"io"
@@ -74,10 +72,12 @@ Flags:
 	defer db.Close()
 	store := &Store{db: db}
 
-	srcStore, err := buildBlobStore(ctx, cfg, src, cfg.BlobDir)
+	srcBackend, err := buildBlobStore(ctx, cfg, src, cfg.BlobDir)
 	if err != nil {
 		log.Fatalf("source backend (%s): %v", src, err)
 	}
+	// Compacted blobs live inside packs; read them the way the server does.
+	srcStore := newPackedBlobs(srcBackend, db)
 	dstStore, err := buildBlobStore(ctx, cfg, dst, dstDir)
 	if err != nil {
 		log.Fatalf("destination backend (%s): %v", dst, err)
@@ -96,6 +96,19 @@ Flags:
 	if err != nil {
 		log.Fatalf("enumerate blobs: %v", err)
 	}
+	// Packs and dictionaries move too, so blob_locations stays true at the
+	// destination; blobs whose loose copy was reclaimed travel inside them.
+	packed, err := store.PackedBlobRefs(ctx)
+	if err != nil {
+		log.Fatalf("enumerate packs: %v", err)
+	}
+	kept := refs[:0]
+	for _, r := range refs {
+		if !packed.reclaimed[r.Key] {
+			kept = append(kept, r)
+		}
+	}
+	refs = append(kept, packed.objects...)
 
 	dstLabel := dst
 	if dst == "file" {
@@ -114,8 +127,7 @@ Flags:
 			continue
 		}
 		// The key IS the sha256 of the content; verify before trusting it.
-		sum := sha256.Sum256(data)
-		if "sha256/"+hex.EncodeToString(sum[:]) != ref.Key {
+		if !keyMatches(ref.Key, data) {
 			fmt.Printf("  ✗ %s — source bytes do not match hash; skipping\n", ref.Key)
 			mismatched++
 			continue
@@ -133,8 +145,7 @@ Flags:
 			if err != nil {
 				log.Fatalf("verify %s: re-read failed: %v", ref.Key, err)
 			}
-			vsum := sha256.Sum256(vdata)
-			if "sha256/"+hex.EncodeToString(vsum[:]) != ref.Key {
+			if !keyMatches(ref.Key, vdata) {
 				log.Fatalf("verify %s: destination bytes do not match hash", ref.Key)
 			}
 		}
