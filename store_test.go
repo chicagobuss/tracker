@@ -6,8 +6,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -1217,5 +1220,38 @@ func TestKindsHash_Injective(t *testing.T) {
 	}
 	if len(emptyHash) != 64 || len(realHash) != 64 {
 		t.Fatalf("hashes must be 64 hex chars, got len %d and %d", len(emptyHash), len(realHash))
+	}
+}
+
+// The file backend must never leave a partial blob under its final, hash-named
+// path, nor litter the blob directory with temp files. Needs no database.
+func TestLocalBlobStore_PutObjectIsAtomic(t *testing.T) {
+	dir := t.TempDir()
+	l := &LocalBlobStore{blobDir: dir}
+	ctx := context.Background()
+	const key = "sha256/0123abcd"
+	for _, body := range []string{"first write", "same key again"} {
+		if err := l.PutObject(ctx, key, []byte(body), "text/markdown"); err != nil {
+			t.Fatalf("PutObject: %v", err)
+		}
+		rc, err := l.GetObject(ctx, key)
+		if err != nil {
+			t.Fatalf("GetObject: %v", err)
+		}
+		got, _ := io.ReadAll(rc)
+		rc.Close()
+		if string(got) != body {
+			t.Fatalf("read back %q, want %q", got, body)
+		}
+	}
+	entries, err := os.ReadDir(filepath.Join(dir, "sha256"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "0123abcd" {
+		t.Fatalf("blob dir holds %v, want only the blob (no leftover temp files)", entries)
+	}
+	if info, _ := entries[0].Info(); info.Mode().Perm() != 0644 {
+		t.Errorf("blob mode %v, want 0644", info.Mode().Perm())
 	}
 }
