@@ -14,6 +14,7 @@ All endpoints are S3-compatible (RustFS, AWS S3, Cloudflare R2).
 import hashlib
 import os, sys
 from concurrent.futures import ThreadPoolExecutor
+
 import boto3
 from botocore.config import Config
 
@@ -90,37 +91,20 @@ def list_archives():
 
 
 
-# --- blob pool -------------------------------------------------------------
-# The pool is an append-only, content-addressed mirror of the content store,
-# shared by every snapshot. Blobs are immutable and named by their own sha256,
-# so a key already in the pool can never need re-fetching — that is what makes
-# a backup run cost O(new blobs) instead of O(all blobs).
+
+# --- blob pool: read side only, for restoring pre-pack snapshots -------------
+# Packs replaced the per-file pool for NEW backups, but snapshots written in the
+# pool era stay restorable for as long as they are retained. Deleting these
+# commands while restore.sh still called them left `verify-pool` and
+# `upload-from-pool` as "unknown command" — the compatibility promise in that
+# script's header was not actually kept.
+#
+# The write side is deliberately gone: nothing creates or garbage-collects a
+# pool any more, so `sync-pool`, `push-pool` and `gc-pool` would only invite
+# writing to a store that is no longer the source of truth.
 
 def _pool_path(pool, key):
     return os.path.join(pool, key)
-
-
-def sync_pool(pool):
-    """Copy content-store objects the pool does not already hold."""
-    s3, b = content_client(), os.environ["S3_BUCKET"]
-    have = set()
-    for root, _, files in os.walk(pool):
-        for f in files:
-            have.add(os.path.relpath(os.path.join(root, f), pool))
-    seen = 0
-    todo = []
-    for page in s3.get_paginator("list_objects_v2").paginate(Bucket=b):
-        for o in page.get("Contents", []):
-            seen += 1
-            if o["Key"] not in have:
-                todo.append(o["Key"])
-    for k in todo:
-        os.makedirs(os.path.dirname(_pool_path(pool, k)), exist_ok=True)
-    if todo:
-        with ThreadPoolExecutor(max_workers=int(os.environ.get("BACKUP_PARALLEL", "16"))) as ex:
-            list(ex.map(lambda k: s3.download_file(b, k, _pool_path(pool, k)), todo))
-    print(f"pool sync: {seen} in store, {len(todo)} newly fetched, {seen - len(todo)} already held")
-
 
 def verify_pool(pool, keys_file, deep=False):
     """Every key a snapshot needs must be present; optionally hash-check bytes.
@@ -150,7 +134,6 @@ def verify_pool(pool, keys_file, deep=False):
         sys.exit(f"pool verify FAILED: {len(missing)} missing, {len(corrupt)} corrupt of {len(keys)}")
     print(f"pool verify OK: {len(keys)} keys present" + (" and hash-correct" if deep else ""))
 
-
 def upload_from_pool(pool, keys_file):
     """Restore path: push exactly the keys a snapshot references.
 
@@ -171,46 +154,18 @@ def upload_from_pool(pool, keys_file):
         s3.upload_file(p, b, k)
     print(f"uploaded {len(keys)} blobs from pool to {b}")
 
-
 def _pool_prefix():
     base = os.environ.get("BACKUP_S3_PREFIX", "").strip("/")
     return (base + "/pool/").lstrip("/")
 
-
-def push_pool(pool):
-    """Mirror the local pool into the backup store, uploading only what is new.
-
-    Without this the offsite copy is a snapshot that references bytes living
-    only on the machine being backed up — which is not an offsite backup. Blobs
-    are immutable, so presence of the key is sufficient: never re-upload.
-    """
-    s3, b = backup_client(), os.environ["BACKUP_S3_BUCKET"]
-    ensure_bucket(s3, b)
-    pre = _pool_prefix()
-    have = set()
-    for page in s3.get_paginator("list_objects_v2").paginate(Bucket=b, Prefix=pre):
-        for o in page.get("Contents", []):
-            have.add(o["Key"][len(pre):])
-    todo, held = [], 0
-    for root, _, files in os.walk(pool):
-        for f in files:
-            full = os.path.join(root, f)
-            key = os.path.relpath(full, pool)
-            if key in have:
-                held += 1
-            else:
-                todo.append((full, key))
-    # Thousands of small objects over a WAN are latency-bound, not
-    # bandwidth-bound, so upload them concurrently. Steady state is a handful of
-    # blobs; this matters for the initial seed and for a rebuild.
-    if todo:
-        with ThreadPoolExecutor(max_workers=int(os.environ.get("BACKUP_PARALLEL", "16"))) as ex:
-            list(ex.map(lambda t: s3.upload_file(t[0], b, pre + t[1]), todo))
-    print(f"pool push: {len(todo)} uploaded, {held} already offsite")
-
-
 def pull_pool(pool):
-    """Disaster recovery: rebuild a local pool from the backup store."""
+    """Disaster recovery: rebuild a local pool from the backup store.
+
+    Downloads land on a temp name and are hash-checked before they take the real
+    one. Writing straight to the final path and then skipping anything that
+    "exists" meant an interrupted run left a truncated blob that every later run
+    accepted as present — the retry reported zero work and the corruption stayed.
+    """
     s3, b = backup_client(), os.environ["BACKUP_S3_BUCKET"]
     pre = _pool_prefix()
     todo = []
@@ -218,29 +173,33 @@ def pull_pool(pool):
         for o in page.get("Contents", []):
             rel = o["Key"][len(pre):]
             dst = os.path.join(pool, rel)
-            if not os.path.exists(dst):
-                todo.append((o["Key"], dst))
+            if os.path.exists(dst):
+                # Present is not the same as correct: re-fetch anything whose
+                # bytes do not hash to the name it is stored under.
+                if os.path.getsize(dst) == o["Size"] and (
+                        not rel.startswith("sha256/")
+                        or hashlib.sha256(open(dst, "rb").read()).hexdigest() == rel.split("/", 1)[1]):
+                    continue
+            todo.append((o["Key"], dst))
     for _, dst in todo:
         os.makedirs(os.path.dirname(dst), exist_ok=True)
+
+    def _get(t):
+        key, dst = t
+        part = dst + ".part"
+        s3.download_file(b, key, part)
+        rel = key[len(pre):]
+        if rel.startswith("sha256/"):
+            h = hashlib.sha256(open(part, "rb").read()).hexdigest()
+            if h != rel.split("/", 1)[1]:
+                os.remove(part)
+                sys.exit(f"pool object {rel} does not match its own hash — refusing to install it")
+        os.replace(part, dst)
+
     if todo:
         with ThreadPoolExecutor(max_workers=int(os.environ.get("BACKUP_PARALLEL", "16"))) as ex:
-            list(ex.map(lambda t: s3.download_file(b, t[0], t[1]), todo))
+            list(ex.map(_get, todo))
     print(f"pool pull: {len(todo)} blobs fetched into {pool}")
-
-
-def gc_pool(pool, keep_file):
-    """Delete pool objects no retained snapshot and no live doc references."""
-    keep = {k.strip() for k in open(keep_file) if k.strip()}
-    removed = kept = 0
-    for root, _, files in os.walk(pool):
-        for f in files:
-            rel = os.path.relpath(os.path.join(root, f), pool)
-            if rel in keep:
-                kept += 1
-            else:
-                os.remove(os.path.join(root, f))
-                removed += 1
-    print(f"pool gc: kept {kept}, removed {removed}")
 
 
 CMDS = {
@@ -249,11 +208,8 @@ CMDS = {
     "put-archive": lambda a: put_archive(a[0], a[1] if len(a) > 1 else None),
     "get-archive": lambda a: get_archive(a[0], a[1]),
     "list-archives": lambda a: list_archives(),
-    "sync-pool": lambda a: sync_pool(a[0]),
     "verify-pool": lambda a: verify_pool(a[0], a[1], "--deep" in a),
     "upload-from-pool": lambda a: upload_from_pool(a[0], a[1]),
-    "gc-pool": lambda a: gc_pool(a[0], a[1]),
-    "push-pool": lambda a: push_pool(a[0]),
     "pull-pool": lambda a: pull_pool(a[0]),
 }
 

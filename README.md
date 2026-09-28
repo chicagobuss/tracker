@@ -468,9 +468,12 @@ suffix). The one quirk: a file literally *named* `raw`, `lock`, `soft-delete`, o
 ## Backup & restore
 
 State lives in two places that must be captured together: Postgres (the index)
-and the blobs (the content). One self-contained tarball holds both — `db.dump` +
-`blobs/` + `manifest.json`. That tarball is the portable unit; "R2 vs S3 vs a
-local directory" is just where you keep it.
+and the blobs (the content). Each run writes a small snapshot — `db.dump` +
+`keys.txt` + `manifest.json` — while the blob bytes live once in a shared, growing
+set of pack files that every snapshot draws on. **A snapshot on its own is not a
+restore: you need the packs too.** Blobs are immutable and named by their own
+sha256, so a run costs O(new blobs) rather than O(all blobs), and each blob is
+stored once instead of `BACKUP_KEEP` times.
 
 ```bash
 scripts/backup.sh                 # -> ./backups/tracker-backup-<ts>.tar.gz
@@ -484,9 +487,11 @@ scripts/restore.sh --from-s3 tracker-backup-<ts>.tar.gz   # pull from R2/S3 firs
 docker compose up -d tracker                              # then start the service
 ```
 
-The backup dumps Postgres **first**, then copies blobs — and since writes are
-blob-first, every `content_key` in the dump is guaranteed to have its blob, so the
-tarball is always internally consistent. Restore is verified round-trip: restoring
+The backup dumps Postgres **first**, then folds the content store into the packs.
+Writes are blob-first, so every `content_key` in the dump already has its blob;
+folding the whole store rather than a key list queried afterwards means a delete
+racing the dump cannot orphan a referenced blob. A restore derives the keys it
+needs from the database it just restored, so the two can never disagree. Restore is verified round-trip: restoring
 into a scratch DB+bucket reproduces the exact doc/blob counts and a tracker booted
 against it serves the content. `scripts/s3util.py` moves blobs and tarballs to any
 S3-compatible store (RustFS, AWS S3, Cloudflare R2).

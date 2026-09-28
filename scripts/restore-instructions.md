@@ -12,7 +12,7 @@ secret.
   are reading this file you already have them.
 - **Docker**, or a Postgres 17 (with pgvector) and somewhere S3-compatible to
   put blobs.
-- Disk for the database dump plus the blob pool (sizes in the facts above).
+- Disk for the database dump plus the blob packs (sizes in the facts above).
 
 The tracker image and source are both public — no GitHub account required:
 
@@ -22,7 +22,8 @@ The tracker image and source are both public — no GitHub account required:
 ## What is in the bucket
 
     <prefix>/tracker-backup-<timestamp>.tar.gz   point-in-time snapshots
-    <prefix>/pool/sha256/<hash>                  content blobs, shared by all snapshots
+    <prefix>/packs/blobs-<YYYYMMDD>-NNN-<sha256>.tar  content blobs, shared by all snapshots
+    <prefix>/packs/INDEX                         which pack holds which blob (self-checking)
     <prefix>/RESTORE.md                          this file
 
 A snapshot is small and contains no blob bytes:
@@ -31,11 +32,23 @@ A snapshot is small and contains no blob bytes:
     keys.txt        the content keys this snapshot needs, one per line
     manifest.json   counts, versions, storage type, created_at
 
-Blobs are immutable and named by their own sha256, so one pool serves every
-snapshot. **A snapshot alone is not a restore — you need the pool too.**
+Blobs are immutable and named by their own sha256, so the packs serve every
+snapshot. **A snapshot alone is not a restore — you need the packs too.** A pack
+file is never modified: its name contains the sha256 of its own contents, so when
+the current day's pack gains blobs it is published under a new name and the old
+one is removed only after the new `INDEX` naming it is durable. That is what
+makes a backup recoverable if it is interrupted — the index is the only thing
+that moves, and it moves in one step.
 
-Snapshots made before 2026-08-05 instead contain a `blobs/` directory and are
-self-contained; they need nothing from the pool.
+If `INDEX` is lost or unreadable, it can be rebuilt from the packs themselves —
+every member is named by its own sha256, so the mapping is recoverable:
+
+    scripts/blobpack.py reindex ./backups/packs
+
+
+Older layouts still restore: snapshots that reference `<prefix>/pool/sha256/...`
+(per-file blobs) or that embed their own `blobs/` directory are detected
+automatically.
 
 ## The easy path (with the repo)
 
@@ -47,7 +60,7 @@ Set in `.env`: `BACKUP_S3_ENDPOINT`, `BACKUP_S3_BUCKET`, `BACKUP_S3_PREFIX`,
 `S3_*` (or `STORAGE_TYPE=file`) for wherever blobs should now live.
 
     scripts/s3util.py list-archives                    # pick a snapshot
-    scripts/s3util.py pull-pool ./backups/pool         # rebuild the blob pool
+    scripts/blobpack.py pull ./backups/packs           # fetch the packs
     scripts/restore.sh --from-s3 tracker-backup-<ts>.tar.gz
 
 Then start the service with `.env` pointing at that database and blob store.
@@ -55,15 +68,16 @@ Then start the service with `.env` pointing at that database and blob store.
 ## The bare path (no repo, no scripts)
 
 1. Download a snapshot and extract it: `db.dump`, `keys.txt`, `manifest.json`.
-2. Download `<prefix>/pool/` — every object, preserving the `sha256/<hash>` key
-   as its path. (Only the keys in `keys.txt` are strictly required.)
+2. Download `<prefix>/packs/` — the `.tar` files plus `INDEX`. Each pack is an
+   ordinary tar whose member names are the blob keys, so `tar xf` works with no
+   special tooling.
 3. Create a Postgres database and restore into it:
 
        pg_restore -U <user> -d <db> --clean --if-exists --no-owner db.dump
 
-4. Put the blob bytes where the new instance will look for them: upload each
-   file to the content bucket under the *same* `sha256/<hash>` key, or copy them
-   into `BLOB_DIR` with `STORAGE_TYPE=file`.
+4. Extract the packs and put the blob bytes where the new instance will look for
+   them: upload each under the *same* `sha256/<hash>` key it has inside the tar,
+   or copy them into `BLOB_DIR` with `STORAGE_TYPE=file`.
 5. Clear stale write-leases: `delete from doc_locks;`
 6. Run the image, pointing `DATABASE_URL` and the `S3_*`/`BLOB_DIR` settings at
    what you just built. Migrations run automatically on startup and are
