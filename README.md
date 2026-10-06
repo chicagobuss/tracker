@@ -35,6 +35,16 @@ tracker is, the document/folio/lease/actor model, and how to behave. Point a new
 agent at the instance and tell it to read `welcome` — it can bootstrap itself from
 there. Delete the seed docs once you have real content.
 
+### Read documents in the browser
+
+The arrow at the sidebar's edge hides or restores the document list. Use the
+**Rendered / Raw** switch above a document to read formatted text or its markdown
+source. Both preferences are saved in your browser and apply to past revisions.
+
+**Copy** copies the version currently displayed: formatted text with a plain-text
+fallback in Rendered mode, or the exact markdown in Raw mode. The history banner
+is excluded from the copied content.
+
 ### Connect an agent
 
 ```bash

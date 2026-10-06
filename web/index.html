@@ -54,6 +54,11 @@
   button:hover { background:var(--btn-hover-bg); }
   main { flex:1; display:flex; min-height:0; }
   #sidebar { width:300px; border-right:1px solid var(--border); display:flex; flex-direction:column; background:var(--panel); }
+  body.no-sidebar #sidebar { display: none; }
+  #sidebar-edge { flex:0 0 24px; padding-top:.55rem; background:var(--panel); border-right:1px solid var(--border); }
+  #sidebar-toggle { width:100%; height:32px; padding:0; border:0; border-radius:0; background:transparent; color:var(--muted); font-size:24px; line-height:1; }
+  #sidebar-toggle:hover { background:var(--btn-hover-bg); color:var(--fg); }
+  #sidebar-toggle:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
   #filter-container {
     padding: .55rem .7rem;
     border-bottom: 1px solid var(--border);
@@ -101,11 +106,22 @@
   .badge { font-size:10.5px; padding:.05rem .35rem; border-radius:4px; border:1px solid var(--border); color:var(--muted); }
   .lock { color:var(--lock); border-color:var(--lock); }
   #view { flex:1; overflow:auto; padding:1.2rem 1.6rem; }
-  #docmeta { color:var(--muted); font-size:12px; margin-bottom:1rem; padding-bottom:.6rem; border-bottom:1px solid var(--border); display:flex; gap:.7rem; flex-wrap:wrap; }
+  #docmeta { color:var(--muted); font-size:12px; margin-bottom:1rem; padding-bottom:.6rem; border-bottom:1px solid var(--border); display:flex; gap:.7rem; flex-wrap:wrap; align-items:center; }
+  #doc-actions { display:flex; align-items:center; gap:.7rem; margin-left:auto; }
+  #rawbtn { display:inline-flex; align-items:center; gap:.45rem; padding:.15rem 0; border:0; background:transparent; font:inherit; color:var(--muted); white-space:nowrap; }
+  #rawbtn .switch-track { position:relative; width:30px; height:16px; border-radius:8px; background:var(--border); }
+  #rawbtn .switch-thumb { position:absolute; width:12px; height:12px; top:2px; left:2px; border-radius:50%; background:var(--fg); }
+  #rawbtn[aria-checked="true"] .switch-track { background:var(--accent); }
+  #rawbtn[aria-checked="true"] .switch-thumb { transform:translateX(14px); background:var(--panel); }
+  #rawbtn[aria-checked="false"] .rendered-label, #rawbtn[aria-checked="true"] .raw-label { color:var(--fg); font-weight:600; }
+  #rawbtn:focus-visible { outline:2px solid var(--accent); outline-offset:4px; border-radius:3px; }
+  #copybtn { font:inherit; min-width:6.5em; padding:.2rem .5rem; white-space:nowrap; }
+  #copybtn:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
   .md h1,.md h2,.md h3 { line-height:1.25; }
   .md pre { background:var(--input-bg); border:1px solid var(--border); padding:.7rem; border-radius:6px; overflow:auto; }
   .md code { background:var(--input-bg); padding:.1rem .3rem; border-radius:4px; }
   .md pre code { background:none; padding:0; }
+  .rawview { background:var(--input-bg); border:1px solid var(--border); padding:.7rem; border-radius:6px; overflow:auto; white-space:pre-wrap; word-break:break-word; margin:0; }
   .md table { border-collapse:collapse; } .md th,.md td { border:1px solid var(--border); padding:.3rem .5rem; }
   .md blockquote { border-left:3px solid var(--border); margin:0; padding-left:.8rem; color:var(--muted); }
   .md a { color: var(--link); text-decoration: none; }
@@ -276,6 +292,9 @@
       </div>
     </div>
     <div id="list"></div>
+  </div>
+  <div id="sidebar-edge">
+    <button id="sidebar-toggle" title="Hide sidebar" aria-label="Hide sidebar" aria-controls="sidebar" aria-expanded="true">‹</button>
   </div>
   <div id="view"></div>
 </main>
@@ -778,14 +797,22 @@ async function openDoc(idOrSlug, version = null) {
     setRoute("#/doc/" + encSlug(d.slug) + (version ? "?v=" + version : ""));
     loadList();
     let body = "";
+    lastRaw = null;
     if (d.content_key) {
       const raw = await (await api("/docs/" + id + "/raw")).text();
-      body = `<div class="md">${DOMPurify.sanitize(marked.parse(raw))}</div>`;
+      lastRaw = raw;
+      body = renderDoc(raw);
     } else {
       body = `<div class="empty">No content written yet.</div>`;
     }
     const lock = lk ? `<span class="badge lock">🔒 ${esc(lk.owner)} until ${new Date(lk.expires_at).toLocaleTimeString()}</span>` : "";
     const hist = d.version > 1 ? `<span class="badge" id="histbtn" title="version history">⟲ history</span>` : "";
+    // Inert when the doc has no content: there is no raw to show.
+    const actions = d.content_key ? `<div id="doc-actions"><button id="rawbtn" role="switch" aria-label="Raw markdown" aria-checked="${rawView}" title="${rawView ? "Show rendered view" : "Show raw markdown"}">
+        <span class="rendered-label">Rendered</span>
+        <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+        <span class="raw-label">Raw</span>
+      </button><button id="copybtn" title="${rawView ? "Copy raw markdown" : "Copy formatted text"}" aria-live="polite">Copy</button></div>` : "";
     const actor = (d.updated_by || d.created_by) ? `<span>by <strong>${esc(d.updated_by || d.created_by)}</strong></span>` : "";
     const tagsHtml = (d.tags && d.tags.length) ? d.tags.map(t => `<span class="badge">#${esc(t)}</span>`).join(" ") : "";
     view.innerHTML = `<div id="docmeta">
@@ -796,10 +823,14 @@ async function openDoc(idOrSlug, version = null) {
         <span>updated ${new Date(d.updated_at).toLocaleString()}</span>
         ${actor}
         ${tagsHtml}
-        ${lock}${hist}
+        ${lock}${hist}${actions}
       </div><div id="histpanel"></div><div id="docbody">${body}</div>`;
     const hb = $("#histbtn");
     if (hb) hb.onclick = () => toggleHistory(id);
+    const rb = $("#rawbtn");
+    if (rb) rb.onclick = () => toggleRawView(id);
+    const cb = $("#copybtn");
+    if (cb) cb.onclick = copyDoc;
     if (version && version !== d.version) viewRevision(id, version, d.version);
   } catch (e) {
     view.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
@@ -838,9 +869,10 @@ async function viewRevision(id, version, total, el) {
   if (activeSlug) setRoute("#/doc/" + encSlug(activeSlug) + "?v=" + version);
   try {
     const raw = await (await api(`/docs/${id}/revisions/${version}/raw`)).text();
+    lastRaw = raw; // the toggle re-renders whatever version is on screen
     bodyEl.innerHTML = `<div class="oldbanner">Viewing <strong>v${version}</strong> of ${total} `
       + `— <a id="backlatest">back to latest</a></div>`
-      + `<div class="md">${DOMPurify.sanitize(marked.parse(raw))}</div>`;
+      + renderDoc(raw);
     $("#backlatest").onclick = () => openDoc(id);
   } catch (e) { bodyEl.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
 }
@@ -923,6 +955,129 @@ themeToggle.onclick = () => {
   localStorage.setItem("tracker_theme", nextTheme);
   applyTheme(nextTheme);
 };
+
+// The edge control stays visible when the sidebar is collapsed.
+const sidebarToggle = $("#sidebar-toggle");
+function applySidebar(hidden) {
+  document.body.classList.toggle("no-sidebar", hidden);
+  sidebarToggle.textContent = hidden ? "›" : "‹";
+  sidebarToggle.title = hidden ? "Show sidebar" : "Hide sidebar";
+  sidebarToggle.setAttribute("aria-label", sidebarToggle.title);
+  sidebarToggle.setAttribute("aria-expanded", String(!hidden));
+}
+applySidebar(localStorage.getItem("tracker_sidebar") === "hidden");
+sidebarToggle.onclick = () => {
+  const hidden = !document.body.classList.contains("no-sidebar");
+  localStorage.setItem("tracker_sidebar", hidden ? "hidden" : "shown");
+  applySidebar(hidden);
+};
+
+// Raw-markdown view: a global reading preference, persisted per browser, so it
+// survives navigation between docs. renderDoc is the single place the flag is
+// honoured — openDoc and viewRevision both go through it, so opening a past
+// revision does not silently drop back to rendered. esc(), not DOMPurify:
+// the default profile is lossy on source (it deletes HTML comments and an
+// unclosed `<b` swallows the rest of the doc), which is wrong for verbatim.
+let rawView = localStorage.getItem("tracker_raw_view") === "raw";
+let lastRaw = null; // the raw text currently on screen (latest or a revision)
+function renderDoc(raw) {
+  return rawView
+    ? `<pre class="rawview">${esc(raw)}</pre>`
+    : `<div class="md">${DOMPurify.sanitize(marked.parse(raw))}</div>`;
+}
+function toggleRawView(id) {
+  rawView = !rawView;
+  localStorage.setItem("tracker_raw_view", rawView ? "raw" : "md");
+  const rb = $("#rawbtn");
+  if (rb) {
+    rb.setAttribute("aria-checked", String(rawView));
+    rb.title = rawView ? "Show rendered view" : "Show raw markdown";
+  }
+  resetCopyButton();
+  if (lastRaw === null) return;
+  const bodyEl = $("#docbody");
+  if (!bodyEl) return;
+  const banner = bodyEl.querySelector(".oldbanner");
+  bodyEl.innerHTML = (banner ? banner.outerHTML : "") + renderDoc(lastRaw);
+  const back = $("#backlatest");
+  if (back) back.onclick = () => openDoc(id);
+}
+
+function resetCopyButton() {
+  const button = $("#copybtn");
+  if (!button) return;
+  clearTimeout(button.copyResetTimer);
+  button.textContent = "Copy";
+  button.title = rawView ? "Copy raw markdown" : "Copy formatted text";
+}
+
+async function copyDoc() {
+  const button = $("#copybtn");
+  const content = $(rawView ? "#docbody .rawview" : "#docbody .md");
+  if (!button || !content || lastRaw === null || button.copying) return;
+  // Snapshot the visible version and mode before an asynchronous clipboard write.
+  const text = rawView ? lastRaw : content.innerText;
+  const html = rawView ? null : content.innerHTML;
+  clearTimeout(button.copyResetTimer);
+  button.copying = true;
+  try {
+    await writeClipboard(text, html);
+    button.textContent = "Copied!";
+  } catch {
+    button.textContent = "Copy failed";
+    button.title = "Select the document text and copy it manually.";
+  } finally {
+    button.copying = false;
+    button.copyResetTimer = setTimeout(() => {
+      if ($("#copybtn") === button) resetCopyButton();
+    }, 2000);
+  }
+}
+
+async function writeClipboard(text, html) {
+  // The async API needs a secure context; the copy-event path also works on HTTP.
+  try {
+    if (html !== null && navigator.clipboard?.write && window.ClipboardItem) {
+      await navigator.clipboard.write([new ClipboardItem({
+        "text/plain": new Blob([text], { type: "text/plain" }),
+        "text/html": new Blob([html], { type: "text/html" }),
+      })]);
+      return;
+    }
+    if (html === null && navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+  } catch { /* A denied async write may still allow a user-initiated copy event. */ }
+
+  const focused = document.activeElement;
+  const selection = window.getSelection();
+  const ranges = Array.from({ length: selection.rangeCount }, (_, i) => selection.getRangeAt(i).cloneRange());
+  const field = document.createElement("textarea");
+  field.value = text;
+  field.readOnly = true;
+  field.style.cssText = "position:fixed;left:-9999px;top:0;";
+  let handled = false;
+  const onCopy = event => {
+    if (!event.clipboardData) return;
+    event.clipboardData.setData("text/plain", text);
+    if (html !== null) event.clipboardData.setData("text/html", html);
+    event.preventDefault();
+    handled = true;
+  };
+  document.body.appendChild(field);
+  document.addEventListener("copy", onCopy);
+  try {
+    field.select();
+    if (!document.execCommand("copy") || !handled) throw new Error("Clipboard copy failed");
+  } finally {
+    document.removeEventListener("copy", onCopy);
+    field.remove();
+    focused?.focus({ preventScroll: true });
+    selection.removeAllRanges();
+    ranges.forEach(range => selection.addRange(range));
+  }
+}
 
 marked.setOptions({ gfm: true, breaks: false });
 // Start by loading workspaces, then let the URL route open the target item.
