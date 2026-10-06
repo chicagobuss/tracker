@@ -8,6 +8,14 @@ per-entity attribution.
 > browser. Agents should use the **MCP endpoint** or the **JSON API** below —
 > don't scrape the HTML. Add `?format=md` to force this text view.
 
+## Reading in the browser
+
+Use the arrow at the sidebar's edge to hide or restore the list. Above a document,
+the **Rendered / Raw** switch selects formatted text or markdown source; both
+viewing preferences are saved in your browser. **Copy** copies the displayed
+version as formatted text (with plain text for text editors) or exact markdown,
+according to the switch. These controls also work on past revisions.
+
 ## MCP (preferred for agents)
 
 tracker serves MCP natively at **`POST /mcp`** (Streamable HTTP, tools-only).

@@ -107,6 +107,33 @@ func TestWebUISendsConfiguredActor(t *testing.T) {
 	}
 }
 
+func TestWebUIHasSidebarToggleAndRawView(t *testing.T) {
+	index, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web UI: %v", err)
+	}
+	page := string(index)
+	for _, want := range []string{
+		`id="sidebar-toggle"`,
+		`body.no-sidebar #sidebar`,
+		`tracker_sidebar`,
+		`tracker_raw_view`,
+		`class="rawview"`,
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("web UI missing %q", want)
+		}
+	}
+	// renderDoc is the single place the raw-view flag is honoured. It must be
+	// defined and called from both render paths — openDoc and viewRevision —
+	// or opening a past revision silently drops back to rendered. This
+	// string check proves the wiring is present, not that the toggle works;
+	// the latter is a manual check (no JS test harness in this repo).
+	if n := strings.Count(page, "renderDoc("); n < 3 {
+		t.Errorf("renderDoc appears %d times, want >= 3 (definition + openDoc + viewRevision)", n)
+	}
+}
+
 func TestNormalizeCreateError_UniqueViolation(t *testing.T) {
 	err := normalizeCreateError(&pgconn.PgError{Code: "23505"})
 	if !errors.Is(err, ErrAlreadyExists) {
