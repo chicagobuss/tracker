@@ -348,6 +348,17 @@ async function api(path) {
   }
   return r;
 }
+// apiAll walks a paged list endpoint to the end and returns the items under key.
+// The browser wants whole folios; agents get one small page by default.
+async function apiAll(path, key) {
+  const sep = path.includes("?") ? "&" : "?";
+  const items = [];
+  for (;;) {
+    const page = await (await api(`${path}${sep}limit=200&offset=${items.length}`)).json();
+    items.push(...page[key]);
+    if (!page[key].length || items.length >= page.total) return items;
+  }
+}
 
 async function loadWorkspaces() {
   let res;
@@ -618,7 +629,7 @@ async function toggleFolioExpand(slug) {
 async function populateFolioSublist(slug, sublistEl) {
   sublistEl.innerHTML = `<div class="sub-item muted">loading files…</div>`;
   try {
-    const { files } = await (await api("/folios/" + encodeURIComponent(slug))).json();
+    const files = await apiAll("/folios/" + encodeURIComponent(slug), "files");
     if (!files.length) {
       sublistEl.innerHTML = `<div class="sub-item muted">Empty folio</div>`;
       return;
@@ -682,7 +693,7 @@ async function loadList() {
 async function loadFolios() {
   const list = $("#list");
   try {
-    const { folios } = await (await api("/folios?view=full")).json();
+    const folios = await apiAll("/folios?view=full", "folios");
     if (!folios.length) { list.innerHTML = '<div class="empty">No folios.</div>'; return; }
     list.innerHTML = "";
     for (const f of folios) {

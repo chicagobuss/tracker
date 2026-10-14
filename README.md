@@ -614,10 +614,6 @@ task-claim state machines.
 
 ### Features
 
-  - REST folio pagination — GET /folios and folio file listings hardcode
-    limit 500 with no paging. MCP list_folios already supports limit and
-    offset.
-
   - Web UI tasks panel — browse the queue through the existing task endpoints,
     including status filtering and payload/result detail.
 

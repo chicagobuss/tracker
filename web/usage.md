@@ -40,7 +40,7 @@ handles the whole lease + version dance for you. Mutating tools require the
 - `GET /docs/{id}/revisions` — version history (newest first)
 - `GET /docs/{id}/revisions/{version}/raw` — a past version's content bytes
 - `GET /tags` — the whole tag vocabulary with counts
-- `GET /folios` · `GET /folios/{slug}` — collections + their files
+- `GET /folios` · `GET /folios/{slug}` — collections + a page of their files (`limit`, `offset`, `view` as for `/docs`)
 - `GET /folios/{slug}/files/{filename}` (`/raw` for bytes)
 - `GET /tasks?status=&limit=&offset=` · `GET /tasks/{id}` — the shared work queue
 - `GET /actors` — entities that have acted, and when

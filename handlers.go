@@ -666,13 +666,14 @@ func folioTags(folioSlug string, tags []string) []string {
 }
 
 func (s *Server) listFolios(w http.ResponseWriter, r *http.Request) {
-	folios, total, err := s.store.ListDocuments(r.Context(), "", "folio", "", "", "exclude", 500, 0)
+	limit, offset := pageParams(r)
+	folios, total, err := s.store.ListDocuments(r.Context(), "", "folio", "", "", "exclude", limit, offset)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 	resp := listView(r, "folios", folios)
-	resp["count"], resp["total"] = len(folios), total
+	resp["count"], resp["total"], resp["limit"], resp["offset"] = len(folios), total, limit, offset
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -710,13 +711,14 @@ func (s *Server) getFolio(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	files, total, err := s.store.ListDocuments(r.Context(), "", "", folioTag(folio.Slug), "", "exclude", 500, 0)
+	limit, offset := pageParams(r)
+	files, total, err := s.store.ListDocuments(r.Context(), "", "", folioTag(folio.Slug), "", "exclude", limit, offset)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 	resp := listView(r, "files", files)
-	resp["folio"], resp["count"], resp["total"] = folio, len(files), total
+	resp["folio"], resp["count"], resp["total"], resp["limit"], resp["offset"] = folio, len(files), total, limit, offset
 	writeJSON(w, http.StatusOK, resp)
 }
 

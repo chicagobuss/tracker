@@ -288,7 +288,7 @@ func docList(view, key string, docs []Document, total, limit, offset int) map[st
 	default: // table: the token-cheapest projection, right default for agents
 		resp = tableView(docs)
 	}
-	resp["count"], resp["total"], resp["limit"], resp["offset"] = len(docs), total, limit, offset
+	resp["count"], resp["total"], resp["limit"], resp["offset"] = len(docs), total, docPageLimit(limit), offset
 	return resp
 }
 
@@ -605,18 +605,19 @@ var mcpTools = map[string]mcpTool{
 		},
 	},
 	"get_folio": {
-		desc:   "Get a folio (by slug) and the list of files it contains.",
-		schema: obj([]string{"slug"}, map[string]any{"slug": pStr}),
+		desc:   "Get a folio (by slug) and a page of its files, most recently updated first. Default view=table, limit 50 (max 200); page with offset while offset+count < total.",
+		schema: obj([]string{"slug"}, map[string]any{"slug": pStr, "view": pView, "limit": pInt, "offset": pInt}),
 		fn: func(ctx context.Context, s *Server, _ string, a targs) (any, error) {
 			folio, err := s.store.GetDocument(ctx, a.str("slug"))
 			if err != nil {
 				return nil, err
 			}
-			files, total, err := s.store.ListDocuments(ctx, "", "", folioTag(folio.Slug), "", "exclude", 500, 0)
+			limit, offset := a.num("limit", 50), a.num("offset", 0)
+			files, total, err := s.store.ListDocuments(ctx, "", "", folioTag(folio.Slug), "", "exclude", limit, offset)
 			if err != nil {
 				return nil, err
 			}
-			resp := docList("summary", "files", files, total, 500, 0)
+			resp := docList(a.str("view"), "files", files, total, limit, offset)
 			resp["folio"] = folio
 			return resp, nil
 		},
