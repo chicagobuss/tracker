@@ -390,9 +390,13 @@ paths:
 
   /folios:
     get:
-      summary: List folios
+      summary: List folios (paged, most recently updated first)
+      parameters:
+        - { name: view, in: query, schema: { type: string, enum: [summary, table, full], default: summary }, description: "summary = trimmed objects; table = columnar {cols,rows}; full = whole Documents" }
+        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 200 } }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
       responses:
-        "200": { description: folios, content: { application/json: { schema: { type: object, properties: { folios: { type: array, items: { $ref: '#/components/schemas/Document' } }, count: { type: integer }, total: { type: integer } } } } } }
+        "200": { description: "a page of folios; shape depends on view", content: { application/json: { schema: { type: object, properties: { folios: { type: array, items: { $ref: '#/components/schemas/Document' } }, count: { type: integer }, total: { type: integer }, limit: { type: integer }, offset: { type: integer } } } } } }
     post:
       summary: Create a folio
       parameters: [ { $ref: '#/components/parameters/Actor' } ]
@@ -414,9 +418,13 @@ paths:
   /folios/{slug}:
     parameters: [ { name: slug, in: path, required: true, schema: { type: string } } ]
     get:
-      summary: Get a folio and its files
+      summary: Get a folio and a page of its files (most recently updated first)
+      parameters:
+        - { name: view, in: query, schema: { type: string, enum: [summary, table, full], default: summary }, description: "summary = trimmed objects; table = columnar {cols,rows}; full = whole Documents" }
+        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 200 } }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
       responses:
-        "200": { description: folio + files, content: { application/json: { schema: { type: object, properties: { folio: { $ref: '#/components/schemas/Document' }, files: { type: array, items: { $ref: '#/components/schemas/Document' } }, count: { type: integer } } } } } }
+        "200": { description: "folio + a page of files; shape depends on view", content: { application/json: { schema: { type: object, properties: { folio: { $ref: '#/components/schemas/Document' }, files: { type: array, items: { $ref: '#/components/schemas/Document' } }, count: { type: integer }, total: { type: integer }, limit: { type: integer }, offset: { type: integer } } } } } }
         "404": { $ref: '#/components/responses/NotFound' }
 
   /folios/{slug}/files:

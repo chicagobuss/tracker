@@ -665,6 +665,16 @@ func (s *Store) GetDocument(ctx context.Context, idOrSlug string) (*Document, er
 	return scanDoc(s.q(ctx).QueryRow(ctx, `select `+docSelect+` from documents where `+idClause, idOrSlug))
 }
 
+// docPageLimit is the page size ListDocuments actually serves for a requested
+// limit. Callers echo it back so a response never claims a bigger page than it
+// holds (get_folio used to report limit 500 while returning at most 200).
+func docPageLimit(limit int) int {
+	if limit <= 0 {
+		return 50
+	}
+	return min(limit, 200)
+}
+
 // ListDocuments returns a page of documents matching the filters plus the total
 // match count (for pagination). limit defaults to 50 (cap 200) when <= 0.
 //
@@ -677,12 +687,7 @@ func (s *Store) GetDocument(ctx context.Context, idOrSlug string) (*Document, er
 // deleted selects the soft-delete filter: ""/"exclude" (default) hides tombstones,
 // "only" returns soft-deleted docs, "include" returns both.
 func (s *Store) ListDocuments(ctx context.Context, q, kind, tag, mode, deleted string, limit, offset int) ([]Document, int, error) {
-	if limit <= 0 {
-		limit = 50
-	}
-	if limit > 200 {
-		limit = 200
-	}
+	limit = docPageLimit(limit)
 	if offset < 0 {
 		offset = 0
 	}

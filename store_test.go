@@ -676,6 +676,68 @@ func TestAddFolioFile_CallerTagsCannotDisplaceMembership(t *testing.T) {
 	}
 }
 
+// A folio used to be listed in one hardcoded page of "500", which the store
+// silently capped at 200: a folio past 200 files lost the rest
+// with nothing in the response saying so. Both surfaces now page, and report
+// the page they actually served.
+func TestGetFolio_Pages(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	srv := &Server{store: s, cfg: Config{DefaultWorkspace: "default"}}
+
+	if _, err := mcpTools["create_folio"].fn(ctx, srv, "tester", targs{"slug": "f", "title": "F"}); err != nil {
+		t.Fatalf("create_folio: %v", err)
+	}
+	for _, name := range []string{"a.md", "b.md", "c.md"} {
+		if _, err := mcpTools["add_folio_file"].fn(ctx, srv, "tester", targs{"slug": "f", "filename": name}); err != nil {
+			t.Fatalf("add_folio_file %s: %v", name, err)
+		}
+	}
+
+	t.Run("mcp", func(t *testing.T) {
+		page := func(args targs) map[string]any {
+			t.Helper()
+			args["slug"] = "f"
+			out, err := mcpTools["get_folio"].fn(ctx, srv, "", args)
+			if err != nil {
+				t.Fatalf("get_folio %v: %v", args, err)
+			}
+			return out.(map[string]any)
+		}
+		// The default is the token-cheap table, as for list_docs.
+		first := page(targs{"limit": float64(2)})
+		if rows, _ := first["rows"].([][]any); len(rows) != 2 {
+			t.Fatalf("first page rows = %v, want 2 table rows", first["rows"])
+		}
+		if first["total"] != 3 || first["limit"] != 2 || first["offset"] != 0 {
+			t.Errorf("first page total/limit/offset = %v/%v/%v, want 3/2/0", first["total"], first["limit"], first["offset"])
+		}
+		if rest := page(targs{"limit": float64(2), "offset": float64(2)}); rest["count"] != 1 {
+			t.Errorf("second page count = %v, want 1", rest["count"])
+		}
+		if big := page(targs{"limit": float64(500)}); big["limit"] != 200 {
+			t.Errorf("limit 500 reported as %v, want the 200 actually served", big["limit"])
+		}
+	})
+
+	t.Run("rest", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("GET /folios/{slug}", srv.auth(srv.getFolio))
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequest("GET", "/folios/f?limit=2&offset=2", nil))
+		var got struct {
+			Files                []map[string]any
+			Count, Total, Offset int
+		}
+		if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &got) != nil {
+			t.Fatalf("GET /folios/f: %d %s", w.Code, w.Body)
+		}
+		if got.Count != 1 || got.Total != 3 || got.Offset != 2 || len(got.Files) != 1 {
+			t.Errorf("page = count %d total %d offset %d files %d, want 1/3/2/1", got.Count, got.Total, got.Offset, len(got.Files))
+		}
+	})
+}
+
 func TestEvents_EmitOnMutation(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
