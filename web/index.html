@@ -323,7 +323,28 @@ tokenBox.addEventListener("change", async () => {
 });
 
 const workspaceSelect = $("#workspace");
-let currentWorkspace = new URLSearchParams(location.search).get("workspace") || localStorage.getItem("tracker_workspace") || "";
+const urlWorkspace = new URLSearchParams(location.search).get("workspace") || "";
+let currentWorkspace = urlWorkspace || localStorage.getItem("tracker_workspace") || "";
+
+// The workspace lives in the URL, so a copied link opens in the workspace it was
+// copied from. The hash (#/doc/…) is left alone.
+function syncUrlWorkspace(ws) {
+  const params = new URLSearchParams(location.search);
+  if (ws) params.set("workspace", ws); else params.delete("workspace");
+  const search = params.toString();
+  const url = location.pathname + (search ? "?" + search : "") + location.hash;
+  if (url !== location.pathname + location.search + location.hash) history.replaceState(null, "", url);
+}
+
+// The server's default workspace: what a request without X-Workspace lands in.
+async function serverDefaultWorkspace() {
+  try {
+    const h = headers();
+    delete h["X-Workspace"];
+    const r = await fetch("/docs?limit=1&view=table", { headers: h });
+    return r.headers.get("X-Workspace") || "";
+  } catch (e) { return ""; }
+}
 
 function headers() {
   const h = {};
@@ -344,6 +365,7 @@ async function api(path) {
       workspaceSelect.value = serverWs;
       currentWorkspace = serverWs;
       localStorage.setItem("tracker_workspace", serverWs);
+      syncUrlWorkspace(serverWs);
     }
   }
   return r;
@@ -386,6 +408,12 @@ async function loadWorkspaces() {
     const { workspaces } = await res.json();
     if (!workspaces || !workspaces.length) return;
 
+    // A browser that only ever saw the old built-in default follows the server's
+    // default; an explicit choice (or a ?workspace= link) is kept.
+    if (!urlWorkspace && currentWorkspace === "default") {
+      const serverDefault = await serverDefaultWorkspace();
+      if (serverDefault && serverDefault !== "default") currentWorkspace = serverDefault;
+    }
     const prev = currentWorkspace || workspaceSelect.value;
     workspaceSelect.innerHTML = "";
 
@@ -403,18 +431,21 @@ async function loadWorkspaces() {
     }
 
     if (!selectedVal && workspaces.length > 0) {
-      const defOpt = workspaces.find(w => w.name === "default") || workspaces[0];
+      const serverDefault = await serverDefaultWorkspace();
+      const defOpt = workspaces.find(w => w.name === serverDefault) || workspaces.find(w => w.name === "default") || workspaces[0];
       workspaceSelect.value = defOpt.name;
       selectedVal = defOpt.name;
     }
     currentWorkspace = selectedVal;
     localStorage.setItem("tracker_workspace", currentWorkspace);
+    syncUrlWorkspace(currentWorkspace);
   } catch (e) {}
 }
 
 workspaceSelect.addEventListener("change", () => {
   currentWorkspace = workspaceSelect.value;
   localStorage.setItem("tracker_workspace", currentWorkspace);
+  syncUrlWorkspace(currentWorkspace);
   active = activeSlug = activeFolio = null;
   setRoute("");
   loadList();
