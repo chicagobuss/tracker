@@ -19,6 +19,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
 )
 
 type rpcRequest struct {
@@ -78,6 +80,10 @@ func (s *Server) mcpHandler(w http.ResponseWriter, r *http.Request) {
 			rpcError(w, req.ID, -32602, "invalid params: "+err.Error())
 			return
 		}
+		// Every MCP call is POST /mcp; resource.name is how Datadog tells the
+		// tools apart, so each one gets its own latency and error rate.
+		annotateSpan(r.Context(), attribute.String("mcp.tool", p.Name),
+			attribute.String("resource.name", "POST /mcp "+p.Name))
 		tool, ok := mcpTools[p.Name]
 		if !ok {
 			rpcError(w, req.ID, -32602, "unknown tool: "+p.Name)

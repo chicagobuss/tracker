@@ -83,6 +83,10 @@ Usage:
 	}
 
 	ctx := context.Background()
+	shutdownTracing, err := setupTracing(ctx)
+	if err != nil {
+		log.Fatalf("tracing: %v", err)
+	}
 	store, err := openStore(ctx, cfg)
 	if err != nil {
 		log.Fatalf("startup: %v", err)
@@ -226,7 +230,7 @@ Usage:
 		if err != nil {
 			log.Fatalf("listen on %s: %v", addr, err)
 		}
-		srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+		srv := &http.Server{Handler: traceHTTP(mux), ReadHeaderTimeout: 10 * time.Second}
 		servers = append(servers, srv)
 		log.Printf("tracker %s listening on %s | storage=%s | auth=%s | compaction=%s", appVersion(), addr, storage, authState, cfg.Compaction)
 		go func() {
@@ -247,4 +251,5 @@ Usage:
 		_ = srv.Shutdown(shutCtx)
 	}
 	store.db.Close()
+	_ = shutdownTracing(shutCtx)
 }

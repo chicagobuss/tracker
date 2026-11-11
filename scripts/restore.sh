@@ -85,6 +85,18 @@ done
 docker exec "$PG_CONTAINER" psql -U "$PGUSER" -d postgres -tAc \
   "select 1 from pg_database where datname='$DB'" | grep -q 1 \
   || docker exec "$PG_CONTAINER" createdb -U "$PGUSER" "$DB"
+# The dump grants privileges to tracker_agent, a server-wide role that migration
+# 0006 creates the first time tracker starts. A Postgres that has never run
+# tracker (a fresh machine, which is exactly when you restore) doesn't have it,
+# and pg_restore then fails on every GRANT. Create it the same way first.
+docker exec -i -e PGOPTIONS="-c client_min_messages=warning" "$PG_CONTAINER" psql -q -v ON_ERROR_STOP=1 -U "$PGUSER" -d postgres <<'SQL'
+do $$ begin
+  if not exists (select 1 from pg_roles where rolname = 'tracker_agent') then
+    create role tracker_agent nologin nosuperuser nobypassrls;
+  end if;
+end $$;
+grant tracker_agent to current_user;
+SQL
 
 echo "3/5  pg_restore -> $DB"
 # Capture, then judge. Piping straight into grep discarded pg_restore's exit

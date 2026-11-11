@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
 )
 
 type Server struct {
@@ -112,6 +114,10 @@ func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
 				ws = sel
 			}
 		}
+		_, route, _ := strings.Cut(r.Pattern, " ") // "GET /docs/{id}" -> "/docs/{id}"
+		annotateSpan(r.Context(), attribute.String("http.route", route),
+			attribute.String("tracker.workspace", ws),
+			attribute.String("tracker.actor", strings.TrimSpace(r.Header.Get("X-Actor"))))
 		if !validWorkspace(ws) {
 			writeError(w, http.StatusBadRequest, "bad_workspace", ErrBadWorkspace.Error(),
 				map[string]any{"workspace": ws})
