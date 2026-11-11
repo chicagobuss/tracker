@@ -401,7 +401,12 @@ func (s *Store) ListWorkspaces(ctx context.Context) ([]Workspace, error) {
 }
 
 func openStore(ctx context.Context, cfg Config) (*Store, error) {
-	db, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	pcfg, err := pgxpool.ParseConfig(cfg.DatabaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("connect postgres: %w", err)
+	}
+	tracePool(pcfg)
+	db, err := pgxpool.NewWithConfig(ctx, pcfg)
 	if err != nil {
 		return nil, fmt.Errorf("connect postgres: %w", err)
 	}

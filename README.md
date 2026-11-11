@@ -78,6 +78,7 @@ Common knobs, all in `.env`:
 | Keep blobs in S3/R2/MinIO instead of files | `STORAGE_TYPE=s3` + the four required `S3_*` vars |
 | Gate access behind a token | Set `API_TOKENS` to a token generated with `openssl rand -hex 32` |
 | Require attribution on a trusted network without tokens | `REQUIRE_ACTOR=true` |
+| Send traces to an OpenTelemetry collector | `OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector>:4318` (see [Tracing](#tracing)) |
 
 ### Identity vs. access
 
@@ -579,6 +580,20 @@ curl -s -X POST $T/admin/compaction/stop              # drop the remaining budge
 It needs a bearer token when `API_TOKENS` is set. Backups (`scripts/backup.sh`)
 include packs and dictionaries in place of loose copies that have been deleted.
 `migrate-blobs` carries them across backends.
+
+### Tracing
+
+Tracing is off until `OTEL_EXPORTER_OTLP_ENDPOINT` (or
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`) is set; then tracker exports OTLP over
+HTTP to it. Each request is a span named after its route (`GET /docs/{id}`,
+not the raw path) and carries `tracker.workspace` and `tracker.actor`. MCP calls
+add `mcp.tool`, and `resource.name` set to `POST /mcp <tool>` so Datadog shows
+each tool as its own endpoint. Every Postgres query is a child span with its SQL
+text, never its arguments. `/healthz` and `/version` are not traced.
+
+The service name defaults to `tracker`; the standard `OTEL_*` variables
+(`OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`, `OTEL_EXPORTER_OTLP_HEADERS`,
+`OTEL_TRACES_SAMPLER`, …) work as usual.
 
 ## Status & roadmap
 
