@@ -363,10 +363,10 @@ func (s *Store) CreateWorkspace(ctx context.Context, name, description, by strin
 	if !validWorkspace(name) {
 		return nil, ErrBadWorkspace
 	}
-	// Registry writes are not workspace-scoped, so they run on the pool: a caller
-	// in workspace A must be able to create workspace B.
+	// Use the request's connection rather than a second one (see scopeOverride).
+	// The registry has no row-level security, so any workspace's connection works.
 	var ws Workspace
-	err := s.db.QueryRow(ctx, `
+	err := s.q(ctx).QueryRow(ctx, `
 		insert into workspaces (name, description, created_by) values ($1, $2, $3)
 		on conflict (name) do nothing
 		returning name, description, coalesce(created_by,''), created_at`,
@@ -383,7 +383,7 @@ func (s *Store) CreateWorkspace(ctx context.Context, name, description, by strin
 // ListWorkspaces returns the registry. Not workspace-scoped by design — this is
 // how an agent discovers where it is allowed to work.
 func (s *Store) ListWorkspaces(ctx context.Context) ([]Workspace, error) {
-	rows, err := s.db.Query(ctx,
+	rows, err := s.q(ctx).Query(ctx,
 		`select name, description, coalesce(created_by,''), created_at from workspaces order by name`)
 	if err != nil {
 		return nil, err
