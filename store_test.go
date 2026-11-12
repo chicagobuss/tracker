@@ -1317,3 +1317,76 @@ func TestLocalBlobStore_PutObjectIsAtomic(t *testing.T) {
 		t.Errorf("blob mode %v, want 0644", info.Mode().Perm())
 	}
 }
+
+// An override that holds the request's connection while taking another
+// deadlocks the pool under concurrent overrides.
+func TestMCPWorkspaceOverride_HoldsOneConn(t *testing.T) {
+	s := testStore(t)
+	if _, err := s.CreateWorkspace(context.Background(), "alpha", "", "tester"); err != nil &&
+		!errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("create workspace: %v", err)
+	}
+	srv := &Server{store: s, cfg: Config{DefaultWorkspace: "default"}}
+
+	var held int32
+	mcpTools["test_conn_probe"] = mcpTool{fn: func(ctx context.Context, s *Server, _ string, _ targs) (any, error) {
+		held = s.store.db.Stat().AcquiredConns()
+		return map[string]any{}, nil
+	}}
+	defer delete(mcpTools, "test_conn_probe")
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /mcp", srv.auth(srv.mcpHandler))
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"test_conn_probe","arguments":{"workspace":"alpha"}}}`
+	resp, err := http.Post(ts.URL+"/mcp", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	resp.Body.Close()
+	if held != 1 {
+		t.Fatalf("an override call held %d pool connections, want 1", held)
+	}
+}
+
+func TestMCPWorkspaceOverride_ConcurrentCallsComplete(t *testing.T) {
+	s := testStore(t)
+	if _, err := s.CreateWorkspace(context.Background(), "alpha", "", "tester"); err != nil &&
+		!errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("create workspace: %v", err)
+	}
+	srv := &Server{store: s, cfg: Config{DefaultWorkspace: "default"}}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /mcp", srv.auth(srv.mcpHandler))
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	n := int(s.db.Config().MaxConns) * 4
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_docs","arguments":{"workspace":"alpha"}}}`
+	var wg sync.WaitGroup
+	errs := make(chan string, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resp, err := client.Post(ts.URL+"/mcp", "application/json", strings.NewReader(body))
+			if err != nil {
+				errs <- err.Error()
+				return
+			}
+			b, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if strings.Contains(string(b), `"isError":true`) {
+				errs <- string(b)
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		t.Errorf("concurrent override call failed: %s", e)
+	}
+}

@@ -139,6 +139,9 @@ func (s *Server) scopeOverride(ctx context.Context, ws string) (context.Context,
 	case !validWorkspace(ws):
 		return nil, nil, fmt.Errorf("workspace %q is invalid: %w", ws, ErrBadWorkspace)
 	}
+	// Release the request's connection first: holding it while waiting for a
+	// second deadlocks the pool once enough overrides are in flight.
+	releaseAuthConn(ctx)
 	scoped, release, err := s.store.Scoped(ctx, ws)
 	if err != nil {
 		return nil, nil, fmt.Errorf("workspace %q: %w", ws, err)
