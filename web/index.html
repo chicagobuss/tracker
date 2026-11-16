@@ -857,8 +857,13 @@ async function openDoc(idOrSlug, version = null) {
       </button><button id="copybtn" title="${rawView ? "Copy raw markdown" : "Copy formatted text"}" aria-live="polite">Copy</button></div>` : "";
     const actor = (d.updated_by || d.created_by) ? `<span>by <strong>${esc(d.updated_by || d.created_by)}</strong></span>` : "";
     const tagsHtml = (d.tags && d.tags.length) ? d.tags.map(t => `<span class="badge">#${esc(t)}</span>`).join(" ") : "";
+    // Folio files (slug "folio/file") get a link back to their folio in the
+    // header — the same navigation the sidebar badge uses.
+    const folioSlug = d.slug.includes("/") ? d.slug.split("/")[0] : null;
+    const folioHtml = folioSlug ? `<span class="badge" id="foliolink" title="Open folio" style="cursor:pointer; border-color:var(--accent); color:var(--accent);">📁 ${esc(folioSlug)}</span>` : "";
     view.innerHTML = `<div id="docmeta">
         <strong>${esc(d.title || d.slug)}</strong>
+        ${folioHtml}
         <span class="badge">${esc(d.kind)}</span>
         <span>v${d.version}</span>
         <span>${human(d.size_bytes)}</span>
@@ -869,6 +874,8 @@ async function openDoc(idOrSlug, version = null) {
       </div><div id="histpanel"></div><div id="docbody">${body}</div>`;
     const hb = $("#histbtn");
     if (hb) hb.onclick = () => toggleHistory(id);
+    const fl = $("#foliolink");
+    if (fl) fl.onclick = () => showFolioFromDoc(folioSlug);
     const rb = $("#rawbtn");
     if (rb) rb.onclick = () => toggleRawView(id);
     const cb = $("#copybtn");
