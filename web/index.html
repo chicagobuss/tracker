@@ -248,6 +248,33 @@
     mask-image: linear-gradient(to bottom, black 50%, transparent 100%);
     -webkit-mask-image: linear-gradient(to bottom, black 50%, transparent 100%);
   }
+  .home { max-width: 820px; margin: 0 auto; padding: .4rem 0 2.5rem; }
+  .home-head { display: flex; flex-wrap: wrap; gap: .5rem .7rem; align-items: center; color: var(--muted); font-size: 12px; padding-bottom: .75rem; border-bottom: 1px solid var(--border); }
+  .home-head code { background: var(--input-bg); padding: .12rem .38rem; border-radius: 4px; color: var(--fg); }
+  .home-links { display: flex; gap: .8rem; margin-left: auto; }
+  .home-links a { color: var(--link); text-decoration: none; }
+  .home-links a:hover { text-decoration: underline; }
+  .home-title { font-size: 1.55rem; font-weight: 700; letter-spacing: -.01em; margin: 1.1rem 0 .35rem; }
+  .home-lede { color: var(--muted); margin: 0 0 1.5rem; font-size: 14.5px; max-width: 64ch; }
+  .home-section { margin: 1.6rem 0; }
+  .home-section h2 { font-size: 11.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 .65rem; font-weight: 600; }
+  .home-card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: .85rem 1rem; }
+  .home-cmd-bar { display: flex; align-items: center; justify-content: space-between; gap: .75rem; margin-bottom: .55rem; font-size: 12px; color: var(--muted); }
+  .home-copy { font: inherit; min-width: 5.5em; padding: .2rem .55rem; font-size: 12px; }
+  .home-copy:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .home-cmd { background: var(--input-bg); border: 1px solid var(--border); border-radius: 6px; padding: .7rem .85rem; margin: 0; overflow-x: auto; font-size: 12.5px; line-height: 1.55; }
+  .home-note { color: var(--muted); font-size: 12.5px; margin: .6rem 0 0; line-height: 1.5; }
+  .home-note code, .home-card code, .home-concepts code, .home-footer code { background: var(--input-bg); padding: .08rem .3rem; border-radius: 4px; font-size: .92em; }
+  .home-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: .75rem; }
+  .home-card h3 { font-size: 13.5px; margin: 0 0 .35rem; font-weight: 600; }
+  .home-card p { margin: 0; font-size: 13px; color: var(--muted); line-height: 1.5; }
+  .home-concepts { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: .6rem .9rem; margin: 0; padding: .85rem 1rem; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; }
+  .home-concept { font-size: 13px; line-height: 1.5; color: var(--muted); }
+  .home-concept strong { color: var(--fg); font-weight: 600; }
+  .home-footer { margin-top: 2rem; padding-top: .9rem; border-top: 1px solid var(--border); font-size: 12.5px; color: var(--muted); display: flex; flex-wrap: wrap; gap: .5rem 1rem; justify-content: space-between; align-items: center; }
+  .home-footer-links { display: flex; gap: .9rem; }
+  .home-footer a { color: var(--link); text-decoration: none; }
+  .home-footer a:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
@@ -269,9 +296,9 @@
   <button id="refresh">↻</button>
 </header>
 <noscript>
-  This is tracker's human web UI and needs JavaScript. Agents: use the JSON API
-  (e.g. GET /docs, GET /folios) or the spec at /openapi.yaml — or fetch this URL
-  with ?format=md for a readable markdown index. Don't scrape this HTML.
+  This is tracker's human web UI and needs JavaScript. Agents: use POST /mcp,
+  the JSON API (GET /docs, GET /folios), /openapi.yaml, or /llms.txt (also
+  served at this URL with ?format=md).
 </noscript>
 <main>
   <div id="sidebar">
@@ -928,20 +955,214 @@ async function viewRevision(id, version, total, el) {
 
 function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 
-// The help panel renders the same /usage.md the server gives non-browser clients,
-// so there's one source of truth for "how to use tracker".
+// The browser UI renders a human start/help page via DOM APIs (never innerHTML
+// and never interpolating bearer tokens), while /llms.txt, /usage.md, and curl /
+// serve web/usage.md for coding agents.
+function makeEl(tag, className, parts) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (parts !== undefined) appendParts(node, parts);
+  return node;
+}
+
+function appendParts(parent, parts) {
+  if (!Array.isArray(parts)) parts = [parts];
+  for (const part of parts) {
+    if (part === null || part === undefined) continue;
+    if (typeof part === "string") {
+      parent.appendChild(document.createTextNode(part));
+    } else if (part instanceof Node) {
+      parent.appendChild(part);
+    } else if (Array.isArray(part)) {
+      const [tag, text, attrs] = part;
+      const child = document.createElement(tag);
+      if (attrs) {
+        for (const [k, v] of Object.entries(attrs)) child.setAttribute(k, v);
+      }
+      if (text !== undefined && text !== null) child.textContent = text;
+      parent.appendChild(child);
+    }
+  }
+}
+
 async function showHelp() {
   active = null; activeSlug = null; activeFolio = null;
   setRoute("");
   loadList();
-  let version = "";
-  try { version = (await (await api("/version")).json()).version; } catch {}
-  let md = "";
-  try { md = await (await fetch("/usage.md")).text(); } catch {}
-  $("#view").innerHTML = `<div class="md">`
-    + `<p><span class="badge">${esc(version)}</span> <code>${esc(location.origin)}</code> · `
-    + `<a href="/openapi.yaml">openapi.yaml</a></p>`
-    + DOMPurify.sanitize(marked.parse(md)) + `</div>`;
+
+  const ws = (workspaceSelect && workspaceSelect.value ? workspaceSelect.value.trim() : "") || currentWorkspace || "default";
+  const root = makeEl("div", "home");
+
+  // Top meta bar
+  const head = makeEl("div", "home-head");
+  const verBadge = makeEl("span", "badge");
+  verBadge.hidden = true;
+  const wsBadge = makeEl("span", "badge", `ws: ${ws}`);
+  const originCode = makeEl("code", "", location.origin);
+  const links = makeEl("div", "home-links", [
+    ["a", "openapi.yaml", { href: "/openapi.yaml" }],
+    ["a", "llms.txt", { href: "/llms.txt" }],
+  ]);
+  head.append(verBadge, wsBadge, originCode, links);
+  root.appendChild(head);
+
+  // Title & lede
+  root.appendChild(makeEl("h1", "home-title", "tracker"));
+  root.appendChild(makeEl("p", "home-lede",
+    "Shared documents, conflict-safe writes, and a task queue for coding agents — backed by Postgres and content-addressed blobs."));
+
+  // Connect an agent (MCP)
+  const mcpSection = makeEl("section", "home-section");
+  mcpSection.appendChild(makeEl("h2", "", "Connect an agent (MCP)"));
+  const mcpCard = makeEl("div", "home-card");
+
+  const cmdLines = [
+    `claude mcp add --transport http --scope user tracker ${location.origin}/mcp \\`,
+    `  --header "X-Actor: claude-code"`,
+  ];
+  if (ws && ws !== "default") {
+    cmdLines[1] += " \\";
+    cmdLines.push(`  --header "X-Workspace: ${ws}"`);
+  }
+  const mcpCmd = cmdLines.join("\n");
+
+  const cmdBar = makeEl("div", "home-cmd-bar");
+  cmdBar.appendChild(makeEl("span", "", ["Streamable HTTP · ", ["code", "POST /mcp"]]));
+  const copyBtn = makeEl("button", "home-copy", "Copy");
+  copyBtn.type = "button";
+  copyBtn.title = "Copy MCP registration command";
+  copyBtn.setAttribute("aria-live", "polite");
+  let copyTimer = null;
+  let copying = false;
+  copyBtn.onclick = async () => {
+    if (copying) return;
+    clearTimeout(copyTimer);
+    copying = true;
+    try {
+      await writeClipboard(mcpCmd, null);
+      copyBtn.textContent = "Copied!";
+    } catch {
+      copyBtn.textContent = "Copy failed";
+      copyBtn.title = "Select the command and copy it manually.";
+    } finally {
+      copying = false;
+      copyTimer = setTimeout(() => {
+        if (copyBtn.isConnected) {
+          copyBtn.textContent = "Copy";
+          copyBtn.title = "Copy MCP registration command";
+        }
+      }, 2000);
+    }
+  };
+  cmdBar.appendChild(copyBtn);
+
+  const cmdPre = makeEl("pre", "home-cmd");
+  cmdPre.appendChild(makeEl("code", "", mcpCmd));
+
+  const cmdNote = makeEl("p", "home-note", [
+    "Auth enabled? Add ",
+    ["code", '--header "Authorization: Bearer <token>"'],
+    ". Cursor (",
+    ["code", "url"],
+    ") and Gemini CLI (",
+    ["code", "httpUrl"],
+    ") point at ",
+    ["code", `${location.origin}/mcp`],
+    " with the same headers.",
+  ]);
+  mcpCard.append(cmdBar, cmdPre, cmdNote);
+  mcpSection.appendChild(mcpCard);
+  root.appendChild(mcpSection);
+
+  // Using this UI
+  const uiSection = makeEl("section", "home-section");
+  uiSection.appendChild(makeEl("h2", "", "Using this UI"));
+  const grid = makeEl("div", "home-grid");
+
+  const uiCards = [
+    ["Browse & search", [
+      "Full-text search in the top bar (",
+      ["code", '"phrases"'], ", ", ["code", "OR"], ", ", ["code", "-negation"],
+      "; bare words AND). Toggle ", ["strong", "docs / folios"],
+      ", filter or sort the sidebar locally, or collapse it with ", ["code", "‹"], "."
+    ]],
+    ["Read, copy & history", [
+      "Flip ", ["strong", "Rendered / Raw"], " on any doc (saved per browser), click ",
+      ["strong", "Copy"], " for rich text or exact markdown, and use ",
+      ["strong", "⟲ history"], " to inspect or link past revisions."
+    ]],
+    ["Workspaces", [
+      "Switch hard-isolated workspaces in the header dropdown. The workspace stays in the URL (",
+      ["code", "?workspace=…"], "), so copied links open in the right place."
+    ]],
+    ["Actor & token", [
+      "Set ", ["strong", "actor ID"], " if the server enforces ",
+      ["code", "REQUIRE_ACTOR=true"], ", or paste a ", ["strong", "bearer token"],
+      " when ", ["code", "API_TOKENS"], " is set."
+    ]],
+  ];
+  for (const [heading, bodyParts] of uiCards) {
+    const card = makeEl("div", "home-card");
+    card.appendChild(makeEl("h3", "", heading));
+    card.appendChild(makeEl("p", "", bodyParts));
+    grid.appendChild(card);
+  }
+  uiSection.appendChild(grid);
+  root.appendChild(uiSection);
+
+  // How tracker works
+  const conceptsSection = makeEl("section", "home-section");
+  conceptsSection.appendChild(makeEl("h2", "", "How tracker works"));
+  const concepts = makeEl("div", "home-concepts");
+  const conceptItems = [
+    ["Documents & folios", [
+      " — versioned markdown with tags and attribution; folios group related files under ",
+      ["code", "<folio>/<file>"], "."
+    ]],
+    ["Leases + versions", [
+      " — writes require a TTL'd lease and ", ["code", "If-Match"],
+      " version check; crashed agents expire automatically."
+    ]],
+    ["Task queue", [
+      " — atomic ", ["code", "SKIP LOCKED"],
+      " claims with TTL expiry for shared agent work."
+    ]],
+    ["Change feed", [
+      " — cursor-paged ", ["code", "/changes"], " and SSE ",
+      ["code", "/changes/stream"], " so agents react instead of polling."
+    ]],
+  ];
+  for (const [label, descParts] of conceptItems) {
+    concepts.appendChild(makeEl("div", "home-concept", [["strong", label], ...descParts]));
+  }
+  conceptsSection.appendChild(concepts);
+  root.appendChild(conceptsSection);
+
+  // Footer
+  const footer = makeEl("div", "home-footer");
+  footer.appendChild(makeEl("span", "", [
+    "Empty sidebar? Run ", ["code", "scripts/seed.sh"],
+    " to seed a ", ["code", "welcome"], " doc and ", ["code", "getting-started"], " folio."
+  ]));
+  footer.appendChild(makeEl("div", "home-footer-links", [
+    ["a", "Agent cheatsheet (/llms.txt)", { href: "/llms.txt" }],
+    ["a", "OpenAPI 3.1 (/openapi.yaml)", { href: "/openapi.yaml" }],
+    ["a", "Health (/healthz)", { href: "/healthz" }],
+  ]));
+  root.appendChild(footer);
+
+  $("#view").replaceChildren(root);
+
+  try {
+    const res = await fetch("/version");
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.version && verBadge.isConnected) {
+        verBadge.textContent = data.version;
+        verBadge.hidden = false;
+      }
+    }
+  } catch {}
 }
 
 $("#q").addEventListener("input", () => {

@@ -1,161 +1,259 @@
 # [tracker](https://tracker.chicagobuss.dev) [![CI](https://github.com/chicagobuss/tracker/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/chicagobuss/tracker/actions/workflows/ci.yml)
 
-Shared documents, conflict-safe editing, and a task queue for coding agents —
-all over MCP. Postgres holds the index and coordination state; content blobs live
-in local files or any S3-compatible store. Tracker is a small static Go binary with
-a built-in UI and breezy ops for you and your agents on your personal private network.
+Shared documents, conflict-safe writes, a change feed, and a task queue for
+coding agents — over native HTTP MCP. Postgres holds the index and
+coordination state; content-addressed blobs live in local files or S3. One
+static Go binary with a built-in web UI and simple ops for your own network.
+
+[Site](https://tracker.chicagobuss.dev) · [OpenAPI spec](openapi.yaml) ·
+[Agent cheatsheet](web/usage.md) (also served at `/llms.txt`)
 
 ## Quickstart
 
-Needs Docker Compose, Bash, curl, and Python 3. No Go toolchain or build is
-needed — it pulls a prebuilt image.
+Needs Docker Compose, Bash, `curl`, and Python 3. No Go toolchain required — it
+pulls a prebuilt image.
 
 ```bash
 git clone https://github.com/chicagobuss/tracker && cd tracker
-cp .env.example .env          # runs as-is; set PGPASSWORD before the first start
-docker compose up -d --wait   # Postgres + tracker (--wait blocks until it's serving)
-scripts/seed.sh               # a welcome doc + example folio, so it isn't empty
-scripts/smoke.sh              # health + a full create -> lock -> write -> read round-trip
+cp .env.example .env          # set PGPASSWORD before the first start
+docker compose up -d --wait   # Postgres + tracker (--wait blocks until healthy)
+scripts/seed.sh               # welcome doc + getting-started folio (optional)
+scripts/smoke.sh              # proves create -> lock -> write -> read round-trip
 ```
 
-That's a working tracker on `http://127.0.0.1:8770` — web UI in a browser,
-markdown index for agents (`curl http://127.0.0.1:8770`). `make up` does the same
-and runs the smoke test for you; `make seed` seeds it.
+This ^ puts tracker on `http://127.0.0.1:8770`: the web UI in a browser, and the
+agent markdown cheatsheet via `curl http://127.0.0.1:8770` (or `/llms.txt`).
+`make up` runs compose and `smoke.sh` together; `make seed` runs the seed.
 
-Use `--wait`: without it, compose returns as soon as the *container* exists, while
-tracker is still connecting to Postgres and running migrations — so anything you
-run immediately after (a smoke test, an agent, CI) can race the boot.
-
-The Postgres image only uses `PGPASSWORD` while it first initializes its data
-volume. If you change it later, rotate the database password too; changing only
-`.env` will stop tracker from connecting.
-
-The seeded `welcome` document is written **for an agent to read**: it explains what
-tracker is, the document/folio/lease/actor model, and how to behave. Point a new
-agent at the instance and tell it to read `welcome` — it can bootstrap itself from
-there. Delete the seed docs once you have real content.
-
-### Read documents in the browser
-
-The arrow at the sidebar's edge hides or restores the document list. Use the
-**Rendered / Raw** switch above a document to read formatted text or its markdown
-source. Both preferences are saved in your browser and apply to past revisions.
-
-**Copy** copies the version currently displayed: formatted text with a plain-text
-fallback in Rendered mode, or the exact markdown in Raw mode. The history banner
-is excluded from the copied content.
+- **Use `--wait`**: compose returns as soon as the container exists, while
+  tracker is still connecting to Postgres and running migrations.
+- **Change `PGPASSWORD` upfront**: the Postgres image only reads it when first
+  initializing its volume; changing it later requires updating the DB user too.
 
 ### Connect an agent
 
 ```bash
 claude mcp add --transport http --scope user tracker http://127.0.0.1:8770/mcp \
-  --header "X-Actor: claude-code-<host>"
+  --header "X-Actor: claude-code-$(hostname -s)"
 ```
 
-Start a new Claude session and ask it to read `welcome`. If you enabled auth, add
-`--header "Authorization: Bearer <token>"` to the command above.
+Cursor (`url`), Gemini CLI (`httpUrl`), and other Streamable HTTP MCP clients
+configure the same endpoint and `X-Actor` header. Add
+`--header "Authorization: Bearer <token>"` if `API_TOKENS` is set. Point a new
+agent at `welcome` if you ran `scripts/seed.sh`.
 
-Already using port 8770? Compose will fail with `address already in use`. Set two
-lines in `.env` and re-run `docker compose up -d`:
+### Common knobs
 
-```bash
-PORT=8771
-BASE_URL=http://127.0.0.1:8771
-```
+Defaults are safe for a first run: loopback-only, `./data/blobs`, auth off. All
+knobs live in `.env`:
 
-Use `http://127.0.0.1:8771/mcp` in the agent-registration command above.
-
-Defaults are deliberately safe for a first run: loopback-only, blobs in
-`./data/blobs`, auth off. Before you expose it to other machines, read
-[Going multi-machine](#going-multi-machine) — it is one setting plus a token.
-
-Common knobs, all in `.env`:
-
-| Want to… | Set |
+| Want to… | Set in `.env` |
 |---|---|
-| Use a different port (8770 taken) | `PORT=8771` and `BASE_URL=http://127.0.0.1:8771` |
-| Let other machines reach it | `BIND_ADDR=<your LAN/Tailscale IP>` |
-| Keep blobs in S3/R2/MinIO instead of files | `STORAGE_TYPE=s3` + the four required `S3_*` vars |
-| Gate access behind a token | Set `API_TOKENS` to a token generated with `openssl rand -hex 32` |
-| Require attribution on a trusted network without tokens | `REQUIRE_ACTOR=true` |
-| Send traces to an OpenTelemetry collector | `OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector>:4318` (see [Tracing](#tracing)) |
+| Move off port 8770 | `PORT=8771` and `BASE_URL=http://127.0.0.1:8771` |
+| Expose to other machines | `BIND_ADDR=<LAN/Tailscale IP>`, `BASE_URL`, `API_TOKENS` |
+| Store blobs in S3 / R2 / MinIO | `STORAGE_TYPE=s3` + `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET` |
+| Require bearer auth | `API_TOKENS=<token>` (generate with `openssl rand -hex 32`) |
+| Require `X-Actor` on a trusted net | `REQUIRE_ACTOR=true` (when `API_TOKENS` is empty) |
+| Pin a default workspace | `DEFAULT_WORKSPACE=<name>` (defaults to `default`) |
+| Send OpenTelemetry traces | `OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector>:4318` |
 
-### Identity vs. access
+## How it works
 
-Two different things, easy to conflate:
+- **Documents, folios & web UI.** Documents are versioned markdown (or any
+  bytes) with UUID/slug addressing, tags, metadata, and attribution. Folios are
+  tableless, gist-like collections: a `kind='folio'` doc whose files are docs
+  tagged `folio:<slug>` with slug `<folio>/<filename>` (import GitHub gists via
+  `scripts/import_gists.py`). The built-in UI supports dark/light themes,
+  full-text search, a collapsible sidebar, a **Rendered / Raw** toggle,
+  clipboard copy, shareable revision links, and workspace switching.
+- **Two-layer write safety (leases + CAS).** A `PUT` write requires both (a) a
+  live TTL'd `doc_locks` lease (`X-Lease-Token`) and (b) `If-Match: <version>`
+  optimistic concurrency. Crashed agents' leases expire automatically. Over MCP,
+  `update_doc` runs acquire → version-check write → release server-side.
+  `409 lease_held` and `412 version_conflict` are coordination working, not bugs
+  to work around.
+- **Workspaces (Postgres RLS).** Hard partitions enforced by PostgreSQL
+  row-level security (`app.workspace`), not query `WHERE` clauses — docs,
+  folios, tasks, actors, and tags in one workspace are invisible from another.
+  `X-Workspace` (or an MCP tool's `workspace` arg) selects a workspace;
+  `API_TOKENS=<tok>:<ws>` confines a token so headers/args cannot escape it.
+  Unknown workspace names return `404` rather than silently creating an empty
+  store.
+- **Task queue.** Enqueue work with `POST /tasks`; workers claim atomically via
+  `FOR UPDATE SKIP LOCKED` (FIFO or by ID). Claims expire after `TASK_CLAIM_TTL`
+  (default `1h`) so a dead worker's task comes back, and only the current
+  claimant can complete it.
+- **Change feed & SSE.** Every write appends a monotonic event. Agents resume
+  via `GET /changes?since=<cursor>` (`list_changes` over MCP) or stream live via
+  `GET /changes/stream` (SSE) instead of polling. Cursors are opaque and bound
+  to `(workspace, kind)`.
+- **Content-addressed blobs.** Bytes live under `sha256/<hash>` in local files
+  (`STORAGE_TYPE=file`) or S3 (`STORAGE_TYPE=s3`). Reads return short-lived
+  signed `BASE_URL/blobs/...` URLs (streamed through tracker when using S3), so
+  buckets stay private. Note: `/blobs/<sha256>` is addressed by content hash
+  rather than workspace; keep `API_TOKENS` set if revision listings or hash
+  links should stay gated.
 
-- **`X-Actor`** is *who did it*. Required on every write, recorded as the document
-  author, lease owner, and task claimant. It is **self-asserted** — tracker takes
-  your word for it. That's the intended design on a trusted network: attribution
-  between cooperating agents, not a security boundary.
-- **`API_TOKENS`** is *whether you may talk to the server at all*. It is **empty by
-  default, meaning no auth** — anyone who can reach the port can read and write.
-- **`REQUIRE_ACTOR=true`** is an actor-only admission mode for trusted private
-  networks. With `API_TOKENS` empty, every API and MCP request must carry some
-  nonblank `X-Actor`; the value remains self-asserted and is not authentication.
+## Agents: MCP + skill
 
-So `X-Actor` is not a login, and running without `API_TOKENS` is fine on loopback
-or a private overlay network — but it is the only thing standing between an open
-port and an unauthenticated write API. Turn it on before you expose tracker
-anywhere you don't fully trust.
+tracker serves **Streamable HTTP MCP** natively at `POST /mcp` (stateless,
+tools-only; `GET /mcp` returns `405`). The tools ship inside the binary, so
+clients never drift out of sync with the server.
 
-For a trusted private overlay where reachability is the security boundary, use:
+All **26 MCP tools**:
+- **Docs:** `list_docs`, `get_doc`, `get_raw`, `create_doc`, `update_doc`,
+  `lock_status`, `retag_doc`, `soft_delete_doc`, `restore_doc`,
+  `hard_delete_doc`, `list_tags`
+- **Folios:** `list_folios`, `create_folio`, `get_folio`, `get_folio_file`,
+  `add_folio_file`
+- **Tasks:** `list_tasks`, `get_task`, `enqueue_task`, `claim_task`,
+  `complete_task`
+- **Workspaces:** `list_workspaces`, `create_workspace`
+- **Actors & changes:** `list_actors`, `actor_activity`, `list_changes`
+
+Every scoped tool accepts an optional per-call `workspace` argument (refused on
+confined tokens; ignored by `list_workspaces` / `create_workspace`).
+[`skills/tracker/SKILL.md`](skills/tracker/SKILL.md) is the matching agent skill
+covering when and how to consult tracker.
+
+## Identity, auth & going multi-machine
+
+Keep **attribution** separate from **access control**:
+
+- **`X-Actor`** is *who did it* — required on every mutating call and recorded as
+  author, lease owner, and task claimant. It is self-asserted attribution
+  between cooperating agents, not authentication.
+- **`API_TOKENS`** is *who gets in* — comma-separated bearer tokens (`empty` =
+  auth off). Append `:<workspace>` (`tok-a:personal,tok-b:work`) to confine a
+  token to one workspace. Unauthenticated: `/healthz`, `/version`,
+  `/openapi.yaml`, `/llms.txt`, `/usage.md`, static UI assets, and HMAC-signed
+  `/blobs/...` links. `/metrics` requires a token when `API_TOKENS` is set.
+- **`REQUIRE_ACTOR=true`** (when `API_TOKENS` is empty) requires a non-blank
+  `X-Actor` on every API/MCP request — useful on a trusted private overlay where
+  reachability is the security boundary. Health checks, static assets, and
+  signed blob URLs remain exempt.
+
+To expose tracker across a LAN, Tailscale, or ZeroTier network, bind that
+interface in `.env` and enable `API_TOKENS`:
 
 ```bash
-API_TOKENS=
-REQUIRE_ACTOR=true
-```
-
-Health checks, static UI assets, and signed blob URLs do not require an actor.
-
-## Enabling auth (optional)
-
-Generate a token in your shell, then paste its literal output into `.env` (do
-not put the `$(...)` command substitution in the file):
-
-```bash
-openssl rand -hex 32
 # .env
-API_TOKENS=<paste-the-output-here>     # comma-separate to issue several
+BIND_ADDR=100.x.y.z
+BASE_URL=http://100.x.y.z:8770
+API_TOKENS=<output of: openssl rand -hex 32>
 ```
 
 ```bash
-docker compose up -d --wait            # picks up the new .env
+docker compose up -d --wait
 ```
 
-Every request except `/healthz` now needs the token, or it gets a `401`:
+`scripts/smoke.sh` and `scripts/seed.sh` read `API_TOKENS` from `.env`
+automatically.
+
+## API overview
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/healthz` · `/version` · `/openapi.yaml` · `/llms.txt` | health (pings Postgres), version, OpenAPI spec, agent cheatsheet |
+| `POST` | `/mcp` | native Streamable HTTP MCP endpoint |
+| `POST · GET` | `/docs` | create (`content` seeds v1); list/search (`?q=&mode=&kind=&tag=&deleted=&view=&limit=&offset=`) |
+| `GET · PUT · PATCH · DELETE` | `/docs/{id}` | read; write bytes (`X-Lease-Token` + `If-Match`); relabel; hard-delete (`confirm` = exact slug) |
+| `POST` | `/docs/{id}/soft-delete` · `/docs/{id}/restore` | recoverable delete (`cascade=true` for non-empty folios) · restore |
+| `GET` | `/docs/{id}/raw` · `/docs/{id}/revisions[/{v}/raw]` | content bytes · revision history |
+| `POST · GET · DELETE` | `/docs/{id}/lock` | acquire/renew (`409` if held) · status · release |
+| `GET` | `/tags` | tag vocabulary with counts |
+| `GET · POST` | `/folios` · `/folios/{slug}` · `/folios/{slug}/files[/{filename}[/raw]]` | collections + member files |
+| `POST · GET` | `/tasks[/{id}]` · `/tasks/claim` · `/tasks/{id}/claim` · `/tasks/{id}/complete` | task queue: enqueue, list (`?status=`), FIFO or ID claim, claimant-only complete |
+| `GET · POST` | `/workspaces` | list or register workspaces |
+| `GET` | `/actors` · `/actors/{name}/activity` | actor registry + recent writes |
+| `GET` | `/changes` · `/changes/stream` | cursor-paged change feed (`?since=&kind=&limit=`) · SSE stream |
+| `GET · POST` | `/admin/compaction` · `/admin/compaction/{run\|pause\|resume\|stop}` | blob compaction state & control (requires unconfined token if auth is on) |
+| `GET` | `/metrics` | Prometheus exposition (`tracker_blob_reads_total`, `tracker_compaction_*`) |
+
+The authoritative reference is [`openapi.yaml`](openapi.yaml) (served live at
+`/openapi.yaml`).
+
+- **Envelopes & views:** Single resources wrap under type (`{"document":…}`,
+  `{"folio":…}`, `{"task":…}`, `{"lock":…}`); lists return
+  `count/total/limit/offset`; errors return `{"error":{"code","message",…}}`.
+  `view=summary` is the REST default; `view=table` (`{cols,rows}`) is the MCP
+  default; `view=full` returns whole objects.
+- **Multi-segment folio slugs:** `{id}` accepts UUIDs or slugs including
+  `myfolio/file.md`. A file literally named `raw`, `lock`, `soft-delete`, or
+  `restore` collides with suffix routes — address it via
+  `/folios/{slug}/files/{filename}` or UUID.
+- **Soft vs. hard delete:** Prefer `POST /docs/{id}/soft-delete` (excluded from
+  default search, revision history preserved, restorable). `DELETE /docs/{id}`
+  is permanent and always requires `confirm` equal to the exact slug; non-empty
+  folios require `cascade=true` on either delete.
+
+## Operations & internals
+
+<details>
+<summary><strong>Deploying, updating &amp; local development</strong></summary>
 
 ```bash
-curl http://127.0.0.1:8770/docs                                  # 401
-curl -H "Authorization: Bearer <token>" http://127.0.0.1:8770/docs   # 200
+make update TAG=v1.7.2   # standard deploy: pin TRACKER_IMAGE, pull, restart, smoke-test
+make status              # pinned TRACKER_IMAGE vs live /version
+make up                  # start stack from .env + smoke-test
+make down                # stop stack (pgdata volume survives)
+make logs                # tail tracker container logs
+make smoke               # run scripts/smoke.sh against running instance
+make deploy              # dev: build image from working tree and restart
+make test                # run suite against throwaway pgvector container (needs Go)
+make test-docker         # same, running Go in a container too (Docker only)
+make build               # compile local ./tracker binary with version stamped
 ```
 
-Point agents at it by adding one header to the MCP registration:
+**Releases vs. source builds:** `make update TAG=vX.Y.Z` pins `TRACKER_IMAGE` in
+`.env`, pulls the CI-built image, restarts, smoke-tests, and prints `/version`.
+Rolling back is the same command with an earlier tag. Hosts building from a
+working tree (`make deploy` / `docker compose -f docker-compose.yml -f
+compose.build.yml up -d --build`) override `TRACKER_IMAGE` with
+`tracker:local`; `make update` refuses when `COMPOSE_FILE` includes
+`compose.build.yml` rather than silently pinning an ignored tag.
 
-```bash
-claude mcp add --transport http --scope user tracker http://127.0.0.1:8770/mcp \
-  --header "X-Actor: claude-code" \
-  --header "Authorization: Bearer <token>"
-```
+The binary embeds `git describe --tags --always --dirty`, logged at startup,
+served at `/version`, and written to each backup's `manifest.json`. Running
+directly without containers:
+`make build && set -a && . ./.env && set +a && ./tracker`.
 
-`scripts/smoke.sh` and `scripts/seed.sh` read `API_TOKENS` from `.env` themselves,
-so they keep working with no extra flags. Issue a token per agent
-(`API_TOKENS=tok-laptop,tok-ci,tok-server`) if you want to be able to revoke one
-without rotating the rest — but note that a token only grants *access*; it does not
-yet pin which `X-Actor` a caller may claim (see the backlog).
+**Tests:** Lease/CAS and `SKIP LOCKED` semantics live in Postgres, so DB-backed
+tests require `TEST_DATABASE_URL` (`make test` / `make test-docker` manage a
+scratch `pgvector` container automatically) and skip cleanly when unset so bare
+`go test ./...` stays green.
 
-## Quickstart variant: blobs in S3 / R2 / MinIO
+</details>
 
-The default keeps blobs in `./data/blobs`, which needs no extra infrastructure. To
-put them in object storage instead, set `STORAGE_TYPE=s3` and the four `S3_*` vars
-before the first `docker compose up`. Everything else is identical — Postgres still
-holds the index, and it only ever stores the `sha256/<hash>` key, never the
-backend location.
+<details>
+<summary><strong>Multi-interface host networking (Linux)</strong></summary>
 
-**Cloudflare R2** (endpoint is your account's, TLS on, no region):
+To bind several interfaces at once (e.g. loopback + LAN + Tailscale/ZeroTier),
+use [`compose.host.yml`](compose.host.yml) and list comma-separated addresses in
+`LISTEN_ADDR`:
 
 ```bash
 # .env
+LISTEN_ADDR=127.0.0.1:8770,192.168.1.100:8770,10.10.10.10:8770
+```
+
+```bash
+docker compose -f docker-compose.yml -f compose.host.yml up -d
+```
+
+This is Linux-only (`network_mode: host` is a no-op on Docker Desktop for
+macOS/Windows). Verify with `scripts/smoke.sh`, since the default loopback
+healthcheck is disabled in host mode.
+
+</details>
+
+<details>
+<summary><strong>S3 / R2 / MinIO blobs &amp; switching storage backends</strong></summary>
+
+Set `STORAGE_TYPE=s3` and the four `S3_*` variables before starting:
+
+```bash
+# .env (Cloudflare R2 example)
 STORAGE_TYPE=s3
 S3_ENDPOINT=<account-id>.r2.cloudflarestorage.com
 S3_ACCESS_KEY=<r2 access key id>
@@ -164,491 +262,146 @@ S3_BUCKET=tracker-blobs
 S3_USE_SSL=true
 ```
 
-**AWS S3:** `S3_ENDPOINT=s3.<region>.amazonaws.com`, `S3_USE_SSL=true`.
-**MinIO / RustFS / anything S3-compatible:** `S3_ENDPOINT=host:9000`, and
-`S3_USE_SSL=false` if it's plain HTTP on a private network.
-
-```bash
-docker compose up -d --wait
-scripts/smoke.sh                 # writes a doc, so it proves the bucket works
-```
-
-tracker creates the bucket on startup if it doesn't exist and your credentials
-allow it; if they don't, create it first and it will just use it. All four vars are
-required — miss one and tracker refuses to start, naming it, rather than silently
-falling back to local files.
-
-Already running on local files? Don't hand-copy anything — `tracker migrate-blobs`
-does a verified, non-destructive copy and prints the cutover step. See
-[Switching storage backend](#switching-storage-backend).
-
-## Agents: MCP + skill
-
-tracker speaks MCP natively — the server exposes a **Streamable HTTP** MCP
-endpoint at `/mcp`, so any agent connects with one line of config and zero local
-code (like Notion's remote MCP server). Add
-`--header "Authorization: Bearer <token>"` if you set `API_TOKENS`.
-
-`X-Actor` is the agent's identity, stamped on every write. Cursor, Gemini CLI,
-and anything else that speaks HTTP MCP configures the same way — the tools live
-in the tracker binary, versioned and deployed with it, so clients can never drift
-out of sync.
-
-Tools: `list_docs` (incl. `deleted=exclude|only|include`), `get_doc`, `get_raw`,
-`create_doc`, `update_doc` (lease + version-check + release, for you),
-`lock_status`, `retag_doc` (tags/metadata/title/kind without a content rewrite),
-`soft_delete_doc` / `restore_doc` / `hard_delete_doc` (hard delete requires
-`confirm` equal to the slug), `list_tags`, `list_folios`, `create_folio`,
-`get_folio`, `get_folio_file`, `add_folio_file`, the task-queue tools
-(`list_tasks`, `get_task`, `enqueue_task`, `claim_task`, `complete_task`),
-`list_actors`, and `actor_activity`.
-
-`skills/tracker/SKILL.md` is the matching Claude Code skill (copy to
-`~/.claude/skills/tracker/`, then set the base URL at the top) describing
-when/how to consult tracker.
-
-The old per-machine stdio bridge (`mcp/tracker_mcp.py`) has been removed — `/mcp`
-replaces it, and a second copy of the tool surface is exactly the drift the native
-endpoint exists to prevent. It's in git history if you need it.
-
-## Design
-
-- **Leases, not advisory locks.** A `doc_locks` row with a TTL + heartbeat
-  answers "who is writing this right now". A crashed agent's lease auto-expires,
-  so it can never block a doc forever.
-- **Two-layer write safety.** A write requires (a) a live lease the caller holds
-  (`X-Lease-Token`) and (b) `If-Match: <version>` optimistic concurrency, so a
-  stale or lease-less write can't clobber.
-- **Content-addressed blobs.** Bytes are stored under `sha256/<hash>`
-  (immutable, deduped) in either a local directory (`STORAGE_TYPE=file`) or an S3
-  bucket (`STORAGE_TYPE=s3`). Either way agents fetch them from an expiring
-  `BASE_URL/blobs/...` link, so a `content_url` is reachable from wherever
-  tracker is and the bucket stays private.
-- **Task queue.** `tasks` with `FOR UPDATE SKIP LOCKED` claiming — no two agents
-  grab the same task.
-- **Workspaces enforced by the database.** Separation is a Postgres row-level
-  security policy, not a `where` clause this codebase has to remember. A request
-  runs with `app.workspace` set and every table is filtered to it, so a query
-  that forgets its predicate returns nothing rather than another workspace's
-  rows.
-
-## Workspaces
-
-A workspace is a hard partition of the store. Documents, tasks and actors in one
-are invisible from another — separate search results, separate slug namespaces,
-separate `list_tags` vocabularies. Point a throwaway experiment at its own
-workspace and it cannot pollute an agent's context with unrelated work.
-
-```bash
-curl -X POST localhost:8770/workspaces -H 'X-Actor: me' \
-  -H 'Content-Type: application/json' -d '{"name":"greenfield-idea"}'
-
-claude mcp add --transport http --scope user tracker-gf http://127.0.0.1:8770/mcp \
-  --header "X-Actor: claude-code-$(hostname -s)" \
-  --header "X-Workspace: greenfield-idea"
-```
-
-Names match `[a-z0-9][a-z0-9_-]{0,62}`. Creating one is free — a row in a
-registry table, no DDL — so spinning up a dozen costs nothing. An unknown name
-is a `404` rather than an implicit create, so a typo'd `X-Workspace` reports
-itself instead of silently presenting an empty store.
-
-Everything that predates workspaces lives in `default`, and a request that names
-none resolves there, so existing agents keep working untouched.
-
-Tools also take an optional `workspace` argument, so one session can work in
-another workspace without re-registering the server:
-
-```
-list_docs  {"q": "sequencer", "workspace": "scripture"}
-create_doc {"slug": "note", "workspace": "scripture", ...}
-```
-
-Mind where you point a write: a `create_doc` aimed at the wrong workspace
-misfiles the doc, and nothing will warn you — the argument is honoured
-verbatim. It is refused outright when the token is confined, because the
-argument is caller-supplied and would otherwise hand back the boundary the
-token exists to enforce. The registry tools (`list_workspaces`,
-`create_workspace`) take no override; the registry is not workspace-scoped.
-
-**`X-Workspace` is a preference; a confined token is a boundary.** The header is
-caller-supplied, so on its own it separates work without securing it — fine for
-avoiding context pollution between your own agents. To make it enforceable, bind
-the token: `API_TOKENS=<tok-a>:personal,<tok-b>:greenfield-idea`. A confined
-token pins its workspace and ignores the header entirely.
-
-One caveat: `/blobs/<sha256>` is not workspace-scoped. Content is addressed by
-hash, so fetching one means already knowing its content, but revision listings do
-hand out hashes — so keep `API_TOKENS` set if that matters to you.
-
-## Going multi-machine
-
-The default compose is loopback-only on a private bridge network, which works
-the same on Linux, macOS, and Windows. To let agents on other machines reach
-tracker, publish the port on a trusted interface and turn auth on:
-
-```bash
-# .env
-BIND_ADDR=100.x.y.z                  # your LAN / Tailscale / ZeroTier IP
-BASE_URL=http://100.x.y.z:8770       # what agents will use to reach it
-API_TOKENS=<paste-a-generated-token> # never expose tracker without this
-```
-
-To bind **several** interfaces at once (loopback + LAN + Tailscale), use Linux
-host networking, where tracker binds each address in `LISTEN_ADDR` itself:
-
-```bash
-# .env: LISTEN_ADDR=127.0.0.1:8770,192.168.1.100:8770,10.10.10.10:8770
-docker compose -f docker-compose.yml -f compose.host.yml up -d
-```
-
-Host networking is Linux-only — `network_mode: host` is a no-op on Docker
-Desktop, so on macOS/Windows stay with the default compose.
-
-**`X-Actor` is self-asserted attribution, not authenticated identity.** On a
-trusted network that's the point. Set `API_TOKENS` if you need writes to be
-gated; bind actor→token if you need attribution to be tamper-proof (see the
-backlog).
-
-## Ops
-
-```bash
-make update TAG=v1.5.0                 # run a published release here (the standard deploy)
-make status                            # what this host is pinned to vs what it runs
-make up                                # start with whatever .env pins + smoke test
-make down                              # stop; data survives in the pgdata volume
-make logs                              # follow tracker logs
-make smoke                             # prove a running instance round-trips a write
-make deploy                            # DEV: rebuild from your working tree instead
-```
-
-**The standard deploy is `make update TAG=vX.Y.Z`.** It pins `TRACKER_IMAGE` in
-`.env`, pulls that release, restarts, smoke-tests the write path, and prints the
-version the binary actually reports. Rolling back is the same command with an
-earlier tag, so what a host runs is always one greppable line in its `.env`
-rather than whatever its working tree happened to contain.
-
-`make deploy` is the development path: it builds your working tree instead of
-running a release, so the version it stamps is a `git describe` string that
-matches no release. Hosts that build this way set `COMPOSE_FILE` in `.env` to
-include `compose.build.yml`, whose `image: tracker:local` overrides
-`TRACKER_IMAGE` — `make update` detects that and refuses rather than pinning a
-release the stack would ignore.
-
-`make up` pulls the published image. Contributors who want their working tree
-built instead use the build override (that's what `make deploy` does):
-
-```bash
-docker compose -f docker-compose.yml -f compose.build.yml up -d --build
-```
-
-The version is `git describe --tags --always --dirty` — logged at startup, served
-at `/version`, and recorded in each backup's `manifest.json`.
-
-Running the binary directly, no container: `make build && set -a && . ./.env &&
-set +a && ./tracker` (needs Go and a reachable Postgres).
-
-## Releasing
-
-Pushing an annotated `v*` tag is the whole ritual. Everything else is CI.
-
-```bash
-git tag -a v1.5.0 -m "v1.5.0 — Short title
-
-What changed and why, in as much detail as it deserves."
-git push origin v1.5.0
-```
-
-That one push runs three jobs in order, each gated on the last:
-
-| Job | Does |
-|---|---|
-| `test` | gofmt, vet, build, `go test -race` against a real pgvector Postgres |
-| `image` | builds and pushes `ghcr.io/chicagobuss/tracker:v1.5.0` (+ `sha-<short>`) |
-| `release` | creates the GitHub Release from the tag's annotation |
-
-Because `release` needs `image`, a Release can never point at a version that
-failed to publish. Re-running a workflow is safe — the job no-ops if the release
-already exists.
-
-**Write the notes in the tag.** The annotation *is* the release: its first line
-becomes the title, everything after it the body. That keeps `git tag -a` the
-single source of truth instead of maintaining a changelog in two places.
-
-**Use `-a`.** A lightweight tag (plain `git tag v1.5.0`) has no annotation, so
-the release falls back to notes generated from the PRs merged since the previous
-tag — serviceable, but blunter than what you'd write. Both `v1.3.0` and the
-release-less `v1.3.1` predate this and show the two failure modes.
-
-`latest` tracks the default branch, not tags. It moves on every push to `main`,
-so it is whatever `main` last built — pin `vX.Y.Z` for anything you actually
-depend on.
-
-Deploying it is one command on the host, and the same one everywhere:
-
-```bash
-make update TAG=v1.5.0
-```
-
-That pins `TRACKER_IMAGE` in `.env`, pulls, restarts, smoke-tests, and reports
-the running version. It needs no Go toolchain and no checkout of the tag — the
-artifact is the one CI built and tested from that commit, not a local rebuild of
-it. Roll back by naming an earlier tag.
-
-Confirm what actually landed with `make status` or `curl <host>:8770/version`. The
-version is `git describe --tags --always --dirty`, so a build from a dirty or
-untagged tree says so rather than quietly claiming a release number — it is
-logged at startup, served at `/version`, and recorded in each backup's
-`manifest.json`.
-
-## Tests
-
-```bash
-make test          # throwaway Postgres + go test (needs a local Go toolchain)
-make test-docker   # same, but Go runs in a container too (needs only Docker)
-```
-
-Both start a scratch pgvector container, run the suite against it, and tear it
-down. The lease/CAS state machine and `SKIP LOCKED` task claiming are tested
-against a real Postgres, because that's where those semantics actually live — the
-tests skip (rather than fail) if `TEST_DATABASE_URL` isn't set, so a bare
-`go test ./...` stays green without a database.
-
-## API
-
-| Method | Path | Purpose |
-|---|---|---|
-| GET | `/healthz` · `/version` · `/openapi.yaml` · `/llms.txt` | health (checks Postgres), version, spec, agent index |
-| POST | `/mcp` | native MCP endpoint (Streamable HTTP, tools-only) |
-| POST · GET | `/docs` | create (`content` seeds v1); list/search (`?q=&mode=&kind=&tag=&deleted=&view=&limit=&offset=`) |
-| GET · PUT · PATCH · DELETE | `/docs/{id}` | read; write content (lease + `If-Match`); relabel; **hard-delete** (requires `confirm` = slug) |
-| POST | `/docs/{id}/soft-delete` · `/docs/{id}/restore` | soft-delete (recoverable; optional `cascade` for folios) · restore |
-| GET | `/docs/{id}/raw` · `/docs/{id}/revisions[/{v}/raw]` | content bytes; version history |
-| POST · GET · DELETE | `/docs/{id}/lock` | acquire/renew (`409` if held) · status · release |
-| GET | `/tags` | tag vocabulary with counts |
-| GET · POST | `/folios` · `/folios/{slug}` · `/folios/{slug}/files[/{filename}[/raw]]` | collections + their files |
-| POST · GET | `/tasks[/{id}]` · `/tasks/claim` · `/tasks/{id}/complete` | task queue: enqueue, list (`?status=`), claim (TTL'd; expired claims re-claimable), complete (claimant-only) |
-| GET | `/actors` · `/actors/{name}/activity` | entity registry + activity |
-
-The **authoritative reference is `openapi.yaml`** (served live at `/openapi.yaml`).
-
-**Conventions.** Every response is wrapped — a single resource under its type
-(`{"document":…}`, `{"folio":…}`, …), lists as `{"<type>s":[…],"count","total",…}`,
-errors as `{"error":{"code","message",…}}` with machine codes. Lists default to a
-trimmed `view=summary`; `view=table` is a compact columnar `{cols,rows}`,
-`view=full` whole objects. Search is `websearch_to_tsquery` (`mode=web` default;
-`mode=plain` for strict AND).
-
-### Acting entity
-
-Every **mutating** request must send an `X-Actor: <name>` header naming the
-entity performing it (missing → `400`). That value is stamped into
-`created_by`/`updated_by`, the revision `author`, the lease `owner`, and task
-`claimed_by`, and upserted into the `actors` registry. A write must come from the
-entity that **holds the lease** (actor ≠ lease owner → `423`).
-
-### Folios
-
-A **folio** is a collection of related documents (modeled after GitHub gists).
-It's modelled tableless: the folio is itself a document with `kind='folio'` whose
-`metadata` holds `{description, public, github_id, ...}`; its files are documents
-tagged `folio:<slug>` with slug `<folio-slug>/<filename>`. So a folio file
-inherits everything (versioning, leases, attribution, search). Create one with
-`POST /folios` and add files with `POST /folios/{slug}/files`; import your recent
-gists with `scripts/import_gists.py`.
-
-`{id}` accepts a UUID or a slug — including multi-segment folio slugs like
-`myfolio/file.md`, for reads, writes, relabels, delete, `/raw`, and `/lock` alike
-(an exact slug always wins over the `/raw`/`/lock`/`/soft-delete`/`/restore`
-suffix). The one quirk: a file literally *named* `raw`, `lock`, `soft-delete`, or
-`restore` collides with those suffix routes — address those via
-`/folios/{slug}/files/{filename}` or the UUID.
-
-### Soft-delete vs hard-delete
-
-- **Soft-delete** (`POST /docs/{id}/soft-delete`, MCP `soft_delete_doc`) sets
-  `deleted_at`/`deleted_by`. The row and revision history stay; default search
-  (`deleted=exclude`) hides it; `deleted=only|include` finds it; `get_doc` by
-  id/slug still works; `restore_doc` brings it back. Prefer this.
-- **Hard-delete** (`DELETE /docs/{id}`, MCP `hard_delete_doc`) removes the row
-  (revisions cascade; blobs left for GC). It **requires** `confirm` equal to the
-  document's exact slug — MCP marks `confirm` required in the tool schema so
-  agents cannot call it without an explicit matching value. Folios with files
-  need `cascade=true`.
-
-## Backup & restore
-
-State lives in two places that must be captured together: Postgres (the index)
-and the blobs (the content). Each run writes a small snapshot — `db.dump` +
-`keys.txt` + `manifest.json` — while the blob bytes live once in a shared, growing
-set of pack files that every snapshot draws on. **A snapshot on its own is not a
-restore: you need the packs too.** Blobs are immutable and named by their own
-sha256, so a run costs O(new blobs) rather than O(all blobs), and each blob is
-stored once instead of `BACKUP_KEEP` times.
-
-```bash
-scripts/backup.sh                 # -> ./backups/tracker-backup-<ts>.tar.gz
-scripts/backup.sh --upload        # also push to R2/S3 (set BACKUP_S3_* in .env)
-scripts/backup.sh --if-changed    # skip entirely if no content changed (for cron)
-# hourly, only when something changed (BACKUP_KEEP prunes local tarballs, default 48):
-#   7 * * * * /path/to/tracker/scripts/backup.sh --if-changed --upload >> /path/to/tracker/backups/backup.log 2>&1
-
-scripts/restore.sh ./backups/tracker-backup-<ts>.tar.gz   # from a local file
-scripts/restore.sh --from-s3 tracker-backup-<ts>.tar.gz   # pull from R2/S3 first
-docker compose up -d tracker                              # then start the service
-```
-
-The backup dumps Postgres **first**, then folds the content store into the packs.
-Writes are blob-first, so every `content_key` in the dump already has its blob;
-folding the whole store rather than a key list queried afterwards means a delete
-racing the dump cannot orphan a referenced blob. A restore derives the keys it
-needs from the database it just restored, so the two can never disagree. Restore is verified round-trip: restoring
-into a scratch DB+bucket reproduces the exact doc/blob counts and a tracker booted
-against it serves the content. `scripts/s3util.py` moves blobs and tarballs to any
-S3-compatible store (RustFS, AWS S3, Cloudflare R2).
-
-To restore on a **fresh machine**: clone the repo, create `.env`, `docker compose
-up -d postgres`, run `restore.sh`, then `docker compose up -d tracker`.
-
-## Switching storage backend
-
-Blobs are content-addressed and Postgres stores only the `sha256/<hash>` key —
-never the backend location — so switching between local files and S3 is just a
-blob copy plus a config flip. The `migrate-blobs` subcommand does the copy:
+For AWS S3 use `S3_ENDPOINT=s3.<region>.amazonaws.com` (`S3_USE_SSL=true`); for
+MinIO / RustFS use `S3_ENDPOINT=host:9000` (`S3_USE_SSL=false` over plain HTTP
+on a private net). tracker auto-creates the bucket if credentials permit, and
+refuses to start if any of the four `S3_*` variables are missing.
+
+To move an existing store between local files and S3, use `migrate-blobs` — it
+verifies every blob's sha256, is non-destructive and idempotent, and prints the
+`.env` cutover step:
 
 ```bash
 tracker migrate-blobs --to file --blob-dir ./data/blobs   # S3 -> local files
 tracker migrate-blobs --to s3                             # local files -> S3
-#   --dry-run   hash-check + count, write nothing
-#   --verify    also re-read each blob from the destination
+# flags: --dry-run (check + count only), --verify (re-read from destination)
 ```
 
-It reads every referenced blob from the current backend (`STORAGE_TYPE`), verifies
-each against its hash, and writes it to the destination. It is **non-destructive**
-(the source is left intact) and **idempotent**. On success it prints the cutover
-step — set `STORAGE_TYPE` (and `BLOB_DIR` for file) in `.env` and restart — so the
-switch is deliberate and reversible.
+</details>
 
-## Blob compaction
+<details>
+<summary><strong>Backup &amp; restore</strong></summary>
 
-Every revision is kept, one object (or file) per blob. Most blobs are small,
-and many are near-copies of the previous revision of the same document, so on
-disk they cost several times their size. On one real store, 44.7 MB of content
-took 116 MB on a ZFS pool. With compaction on, tracker packs cold blobs in the
-background, through the same backend, so files and S3 work the same way:
+State lives in Postgres (index) and blobs (content). `scripts/backup.sh` dumps
+Postgres **first** (writes are blob-first, so every referenced key already
+exists), then folds the content store into shared content-addressed pack files
+(`O(new blobs)`, stored once rather than `BACKUP_KEEP` times). Each tarball
+(`db.dump` + `keys.txt` + `manifest.json`) depends on those packs — **a snapshot
+without the packs is not a full restore**.
 
-- Each blob is stored as the smallest of: its raw bytes; zstd with a
-  dictionary trained on the store's own blobs; or zstd with the document's
-  previous revision as the dictionary (a delta). Delta chains are capped at 16
-  revisions, after which a blob is stored standalone again, like a keyframe in
-  video.
-- Packs are content-addressed (`packs/<sha256>`). Every member is decoded and
-  checked before a pack is written, and the pack is read back before anything
-  points at it.
-- Reads look for a packed copy first, verify it against its sha256 key, and
-  fall back to the loose copy. Clients see no change: `content_url` still works.
-- The loose copy is deleted after `COMPACT_GRACE`, and only if its packed copy
-  still decodes and verifies at that moment.
+```bash
+scripts/backup.sh                 # -> ./backups/tracker-backup-<ts>.tar.gz (+ packs/)
+scripts/backup.sh --upload        # also push packs + archive to BACKUP_S3_*
+scripts/backup.sh --if-changed    # skip when content tables haven't changed (for cron)
 
-On the store above, best-of encoding brings the content to about 12.8 MB
-(3.5x), in a few hundred packs instead of 15.7k files.
+# Example cron (hourly, upload only on change; BACKUP_KEEP defaults to 48 local tarballs):
+# 7 * * * * /path/to/tracker/scripts/backup.sh --if-changed --upload >> /path/to/tracker/backups/backup.log 2>&1
+
+scripts/restore.sh ./backups/tracker-backup-<ts>.tar.gz
+scripts/restore.sh --from-s3 tracker-backup-<ts>.tar.gz
+docker compose up -d tracker
+```
+
+On a **fresh machine**: clone the repo, create `.env`, run
+`docker compose up -d postgres`, run `scripts/restore.sh`, then
+`docker compose up -d tracker`. `scripts/restore.sh` derives required keys from
+the restored database itself and pulls them via `scripts/s3util.py` /
+`scripts/blobpack.py`.
+
+</details>
+
+<details>
+<summary><strong>Blob compaction</strong></summary>
+
+Because every revision stores its own blob, small repeated edits waste space
+(on one real store, 44.7 MB of content across 15.7k files took 116 MB on ZFS).
+With compaction enabled, tracker packs cold blobs in the background through the
+configured backend:
+
+- Stores each blob as the smallest of: raw bytes, zstd with a store-trained
+  dictionary, or zstd delta against the previous revision (chains capped at 16,
+  like keyframes). On the store above, packing cut disk use to ~12.8 MB (3.5x)
+  in a few hundred packs.
+- Packs are content-addressed (`packs/<sha256>`), decoded and verified before
+  referencing. Reads check packs first, verify the sha256, and fall back to loose
+  copies.
+- Loose copies are only deleted after `COMPACT_GRACE`, and only after re-verifying
+  that the packed copy decodes cleanly.
 
 ```bash
 # .env
 COMPACTION=manual        # off (default) | manual | auto
-COMPACT_AFTER=1h         # pack a blob once it is this old
-COMPACT_GRACE=24h        # then delete its loose copy after this
+COMPACT_AFTER=1h         # pack blobs older than this
+COMPACT_GRACE=24h        # delete loose copy after this grace period
 COMPACT_BATCH=200        # blobs per step
 ```
 
-In `manual` mode nothing is packed until you grant a budget, so the first
-backfill of an existing store happens in steps you choose. Once you trust it,
-switch to `auto`, which packs everything older than `COMPACT_AFTER`
-continuously. With `API_TOKENS` set, these endpoints need a token that isn't
-confined to a workspace:
+In `manual` mode, grant a packing budget explicitly via `/admin/compaction/*`
+(requires an unconfined token if `API_TOKENS` is set):
 
 ```bash
 curl -s $T/admin/compaction                           # state, backlog, ratio, last step
-curl -s -X POST "$T/admin/compaction/run?blobs=500"   # manual: allow 500 more blobs
-curl -s -X POST $T/admin/compaction/pause             # stop packing and reclaiming (persists)
+curl -s -X POST "$T/admin/compaction/run?blobs=500"   # manual: pack up to 500 more blobs
+curl -s -X POST $T/admin/compaction/pause             # pause packing + reclaim (persisted)
 curl -s -X POST $T/admin/compaction/resume
-curl -s -X POST $T/admin/compaction/stop              # drop the remaining budget
+curl -s -X POST $T/admin/compaction/stop              # drop remaining manual budget
 ```
 
-`GET /metrics` exposes the same numbers in Prometheus format
-(`tracker_compaction_*`, `tracker_blob_reads_total{source=loose|pack|fallback}`).
-It needs a bearer token when `API_TOKENS` is set. Backups (`scripts/backup.sh`)
-include packs and dictionaries in place of loose copies that have been deleted.
-`migrate-blobs` carries them across backends.
+`GET /metrics` exposes Prometheus gauges and counters (`tracker_compaction_*`,
+`tracker_blob_reads_total{source=loose|pack|fallback}`).
 
-### Tracing
+</details>
+
+<details>
+<summary><strong>OpenTelemetry tracing</strong></summary>
 
 Tracing is off until `OTEL_EXPORTER_OTLP_ENDPOINT` (or
-`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`) is set; then tracker exports OTLP over
-HTTP to it. Each request is a span named after its route (`GET /docs/{id}`,
-not the raw path) and carries `tracker.workspace` and `tracker.actor`. MCP calls
-add `mcp.tool`, and `resource.name` set to `POST /mcp <tool>` so Datadog shows
-each tool as its own endpoint. Every Postgres query is a child span with its SQL
-text, never its arguments. `/healthz` and `/version` are not traced.
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`) is set; then tracker exports spans over
+OTLP/HTTP.
 
-The service name defaults to `tracker`; the standard `OTEL_*` variables
-(`OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`, `OTEL_EXPORTER_OTLP_HEADERS`,
-`OTEL_TRACES_SAMPLER`, …) work as usual.
+- HTTP spans are named by matched route (`GET /docs/{id}`, not the raw path) and
+  carry `tracker.workspace` and `tracker.actor`.
+- MCP calls add `mcp.tool` and set `resource.name` to `POST /mcp <tool>` so
+  Datadog and similar backends group each tool as its own endpoint.
+- Postgres queries emit child spans with SQL text (never arguments).
+- `/healthz` and `/version` are excluded.
+- `OTEL_SERVICE_NAME` defaults to `tracker`; standard `OTEL_*` variables
+  (`OTEL_RESOURCE_ATTRIBUTES`, `OTEL_EXPORTER_OTLP_HEADERS`,
+  `OTEL_TRACES_SAMPLER`, …) work as usual.
 
-## Status & roadmap
+</details>
 
-Running in "production" (lol) and used heavily for months. Recently landed: CI
-(GitHub Actions → GHCR images), the native `/mcp` endpoint (replacing the
-per-machine client script), task-queue visibility + claim expiry + claim-by-id, a
-real `/healthz`, soft/hard delete, and a test suite covering the lease/CAS and
-task-claim state machines.
+<details>
+<summary><strong>Releasing (maintainers)</strong></summary>
 
-### Hardening
+Push an annotated `v*` tag to trigger the GitHub Actions pipeline (`test` →
+`image` → `release`):
 
-  - Request logging / metrics — `/metrics` exists (blob reads and compaction);
-    add access-log middleware (method, path, status, duration, actor), plus
-    counters for writes and lease conflicts.
+```bash
+git tag -a v1.7.2 -m "v1.7.2 — Short title
 
-  - Auth hardening — use constant-time bearer-token comparison; implement
-    actor↔token binding so a token pins which X-Actor it may assert.
+What changed and why."
+git push origin v1.7.2
+```
 
-  - Migration version tracking — every migrations/*.sql re-runs on each boot
-    and relies on idempotency. Add transactionally applied, checksummed migration
-    tracking before introducing a non-idempotent migration.
+- `test` runs `gofmt`, `go vet`, `go build`, and `go test -race` against a real
+  `pgvector:pg17` service (Forgejo CI mirrors `test` and builds local runner
+  images on pushes to `main` and PRs).
+- `image` builds and pushes `ghcr.io/chicagobuss/tracker:vX.Y.Z` (and
+  `sha-<short>`). `latest` tracks `main`, not tags — pin `vX.Y.Z` for stable
+  deploys.
+- `release` turns the tag annotation into the GitHub Release (first line = title,
+  body = notes) only after `image` succeeds; re-running is safe if the release
+  already exists. Use `-a` (lightweight tags fall back to auto-generated PR
+  notes).
 
-  - Write pre-check — check lease/version before blob upload to reduce orphan
-    blobs on rejected writes (412/423), while retaining the transactional check to
-    prevent races.
+</details>
 
-  - Orphan-blob / expired-lease GC — mark-and-sweep blobs not referenced by
-    documents or document_revisions, and periodically remove expired
-    doc_locks.
+## What it isn't
 
-  - HTTP/MCP tests — the store state machines are covered, but request-level
-    REST and MCP behavior is effectively untested.
+It's a personal tool that got useful and runs daily, and it's honest about that.
+There's no clustering, no multi-tenant SaaS, and no hosted version — it expects a
+private network (LAN, Tailscale, ZeroTier) and the backup scripts in the repo.
 
-### Features
-
-  - Web UI tasks panel — browse the queue through the existing task endpoints,
-    including status filtering and payload/result detail.
-
-  - pgvector semantic search — the embedding column already exists; populate
-    it on write and add a semantic query path.
-
-  ### Ops
-
-  - ~~Scheduled off-box backups~~ — done: cron scripts/backup.sh --if-changed --upload
-    with retention, and add automated restore verification against manifest
-    document/blob counts.
-
-  - Public sandbox instance — a rate-limited, internet-facing demo: Caddy in
-    front with per-IP limits and body caps; bridge networking with only the proxy
-    exposed; a seed-restore reset every ~6h; and app-side quotas such as
-    MAX_DOCS / MAX_TOTAL_BLOB_BYTES so one actor cannot fill the disk between
-    resets. The native /mcp endpoint then gives visitors one-command agent
-    onboarding.
-
-  Longer-horizon ideas—blob compression, retention thinning, and content-defined
-  chunking—should wait until usage metrics justify their complexity.
-
-PRs welcome but I can't promise I'll get to them!
+MIT licensed. Issues and PRs welcome, though I can't promise how fast I'll get
+to them.

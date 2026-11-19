@@ -134,6 +134,77 @@ func TestWebUIHasSidebarToggleAndRawView(t *testing.T) {
 	}
 }
 
+func TestWebUIStartPageSplit(t *testing.T) {
+	index, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatalf("read embedded web UI: %v", err)
+	}
+	page := string(index)
+	start := strings.Index(page, "async function showHelp()")
+	if start < 0 {
+		t.Fatal("web UI missing async function showHelp()")
+	}
+	rest := page[start:]
+	end := strings.Index(rest, `$("#q").addEventListener`)
+	if end < 0 {
+		t.Fatal("web UI missing post-showHelp listener boundary")
+	}
+	body := rest[:end]
+
+	for _, want := range []string{
+		"replaceChildren(",
+		"/llms.txt",
+		"/openapi.yaml",
+		"location.origin",
+		"writeClipboard(",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("showHelp() missing %q", want)
+		}
+	}
+	for _, unwanted := range []string{
+		"/usage.md",
+		"innerHTML",
+		"tokenBox.value",
+	} {
+		if strings.Contains(body, unwanted) {
+			t.Errorf("showHelp() should not contain %q", unwanted)
+		}
+	}
+}
+
+func TestUsageMDAccuracy(t *testing.T) {
+	raw, err := webFS.ReadFile("web/usage.md")
+	if err != nil {
+		t.Fatalf("read embedded usage.md: %v", err)
+	}
+	doc := string(raw)
+
+	for _, want := range []string{
+		"POST /docs/{id}/soft-delete",
+		"POST /docs/{id}/lock",
+		"POST /tasks/claim",
+		"list_workspaces",
+		"list_changes",
+		"cascade=true",
+	} {
+		if !strings.Contains(doc, want) {
+			t.Errorf("web/usage.md missing %q", want)
+		}
+	}
+	for _, stale := range []string{
+		"Reading in the browser",
+		"Since #8",
+		"GET /folios/tracker",
+		"task_type",
+		"`DELETE /docs/{id}` soft-deletes",
+	} {
+		if strings.Contains(doc, stale) {
+			t.Errorf("web/usage.md still contains stale text %q", stale)
+		}
+	}
+}
+
 func TestNormalizeCreateError_UniqueViolation(t *testing.T) {
 	err := normalizeCreateError(&pgconn.PgError{Code: "23505"})
 	if !errors.Is(err, ErrAlreadyExists) {
