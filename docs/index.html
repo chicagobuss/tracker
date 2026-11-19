@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>tracker — a coordination store for coding agents</title>
-<meta name="description" content="A small, self-hosted document store and task queue that lets a fleet of coding agents share context without writing over each other. Postgres, Go, MCP.">
+<meta name="description" content="A small, self-hosted document store, workspace partitioner, and task queue that lets a fleet of coding agents share context without writing over each other. Postgres, Go, MCP.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22><text y=%2213%22 font-size=%2213%22>📁</text></svg>">
 
 <style>
@@ -36,7 +36,7 @@
     font: 16px/1.65 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     -webkit-font-smoothing: antialiased;
   }
-  .wrap { max-width: 94rem; margin: 0 auto; padding: 0 1.25rem; }
+  .wrap { max-width: 46rem; margin: 0 auto; padding: 0 1.25rem; }
 
   header { padding: 4.5rem 0 2.5rem; }
   .eyebrow {
@@ -167,11 +167,20 @@
 
 <h2>What's in it</h2>
 
-<h3>Documents and folios</h3>
+<h3>Documents, folios, and a built-in UI</h3>
 <p>
   A document is a markdown file with a slug, versions, tags, and an author. A folio
   is a small collection of related documents — roughly what a gist was. Full-text
-  search across the lot, and full version history for each.
+  search across the lot, full version history for each, and a lightweight browser UI
+  with rendered/raw switching, shareable revision links, and clipboard copy.
+</p>
+
+<h3>Workspaces</h3>
+<p>
+  Hard partitions enforced by Postgres row-level security, not query
+  <code>WHERE</code> clauses. Point an experiment or swarm at its own workspace with
+  <code>X-Workspace</code>, or enforce the boundary with workspace-confined bearer
+  tokens (<code>token:workspace</code>).
 </p>
 
 <h3>A task queue</h3>
@@ -180,6 +189,13 @@
   (<code>FOR UPDATE SKIP LOCKED</code>, so two agents never get the same one), and
   claims expire, so a crashed worker's task comes back. tracker's own backlog lives
   in it — agents claim and close tracker's development tasks through tracker.
+</p>
+
+<h3>A change feed</h3>
+<p>
+  Every write appends a monotonic event. Cursor-paged <code>/changes</code> and an
+  SSE stream (<code>/changes/stream</code>) let agents wake on updates instead of
+  polling in a loop.
 </p>
 
 <h3>Native MCP</h3>
@@ -195,6 +211,14 @@
 <p>
   <code>X-Actor</code> is the agent's name, stamped on everything it writes — who
   authored a revision, who holds a lease, who claimed a task.
+</p>
+
+<h3>Breezy ops</h3>
+<p>
+  Content-addressed blobs in local files or S3/R2 (<code>migrate-blobs</code>
+  switches backends safely), incremental packed backups, optional background
+  zstd + delta blob compaction, and OpenTelemetry tracing when you point it at a
+  collector.
 </p>
 
 <h2>Try it</h2>
@@ -218,11 +242,12 @@ scripts/smoke.sh              <span class="comment"># proves a write round-trips
 
 <p>
   It's a personal tool that got useful, and it's honest about that. Auth is off by
-  default: on a private network, <code>X-Actor</code> is attribution between
-  cooperating agents, not a security boundary. Set a bearer token before you put it
-  anywhere you don't trust. There's no clustering, no multi-tenancy, and no hosted
-  version. It expects to be reachable on a LAN, Tailscale, or ZeroTier network, and
-  to be backed up with the scripts in the repo.
+  default: on a trusted private network, <code>X-Actor</code> is attribution between
+  cooperating agents (you can require a non-blank actor on every request with
+  <code>REQUIRE_ACTOR=true</code>), not a security boundary. Set a bearer token
+  before you put it anywhere you don't trust. There's no clustering, no
+  multi-tenant SaaS, and no hosted version. It expects to be reachable on a LAN,
+  Tailscale, or ZeroTier network, and to be backed up with the scripts in the repo.
 </p>
 
 <p>

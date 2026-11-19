@@ -67,7 +67,7 @@ fleet of agents: what we decided, what we're doing, and who is editing what righ
 now. If several agents work on the same codebase, this is how they avoid writing
 over each other.
 
-## The four ideas
+## The five ideas
 
 - **document** — one markdown file with a slug, content, versions, and
   attribution. Everything is a document.
@@ -79,6 +79,9 @@ over each other.
   A crashed agent's lease expires on its own, so nothing is blocked forever.
 - **actor** — who you are. Every write is stamped with your `X-Actor` name. It is
   attribution, not authentication: be honest.
+- **workspace** — a hard partition enforced by Postgres row-level security.
+  Documents, folios, tasks, tags, and actors in one workspace are invisible from
+  another. Run `list_workspaces()` before concluding a store is empty.
 
 ## How to use it
 
@@ -86,14 +89,18 @@ Read before you work. Write what others need.
 
 1. **Orient.** `list_docs(q="...")` to search (quoted `"phrases"`, `OR`,
    `-negation`; bare words must all match), `list_folios()` to browse, `list_tags()`
-   to learn the vocabulary. Then `get_doc(id, include_content=true)` to read.
+   to learn the vocabulary, and `list_workspaces()` to see partitions. Then
+   `get_doc(id, include_content=true)` to read.
 2. **Check before editing a shared doc.** `lock_status(id)` tells you whether
    another agent holds the lease. If it does, do something else — don't fight it.
 3. **Write.** `update_doc(id, content)` does the whole dance for you: it takes the
    lease, writes with a version check, and releases. If someone else holds the
    lease, or the document moved under you, it fails cleanly *without writing*.
    That's coordination working, not an error to route around.
-4. **Record outcomes** other agents will need: decisions, gotchas, and the shape
+4. **Coordinate work & watch for changes.** Use `enqueue_task`, `claim_task`,
+   and `complete_task` for queued work, and `list_changes` (or SSE
+   `GET /changes/stream`) to react to mutations instead of polling in a loop.
+5. **Record outcomes** other agents will need: decisions, gotchas, and the shape
    of what you changed. A note nobody can find is a note that doesn't exist —
    tag it (`topic:*`, `status:*`) and give it a slug someone would guess.
 
@@ -108,7 +115,8 @@ Read before you work. Write what others need.
 
 Prefer `soft_delete_doc` — it hides the document from search but keeps the row and
 its history, and `restore_doc` brings it back. `hard_delete_doc` is irreversible
-and requires `confirm` to exactly equal the slug. Think before you use it.
+and requires `confirm` to exactly equal the slug. Deleting a non-empty folio
+(soft or hard) requires `cascade=true`. Think before you hard-delete.
 
 ## Where to look next
 
@@ -156,10 +164,28 @@ store is a database problem and not a file-format problem.
 ## Tasks
 
 The same idea, applied to work instead of documents. `enqueue_task` adds to the
-queue; `claim_task` atomically takes the next one (Postgres `FOR UPDATE SKIP
-LOCKED`, so two agents never get the same task); `complete_task` may only be called
-by the actor that holds the claim. Claims expire too — a crashed worker's task
-becomes claimable again, and `attempts` counts how often that has happened.
+queue; `claim_task()` atomically takes the next claimable one (Postgres
+`FOR UPDATE SKIP LOCKED`, so two agents never get the same task), or pass `id` to
+claim a specific task; `complete_task` may only be called by the actor that holds
+the claim. Claims expire too — a crashed worker's task becomes claimable again,
+and `attempts` counts how often that has happened.
+
+## Workspaces
+
+Workspaces are hard partitions enforced by Postgres row-level security
+(`app.workspace`), not query `WHERE` clauses. An agent pinned to one workspace
+cannot see documents, tasks, tags, or actors in another. Connections choose a
+workspace with `X-Workspace` (and scoped MCP tools accept an optional per-call
+`workspace` argument), unless the connection's bearer token is confined to a
+workspace — which enforces a hard boundary. Unknown workspace names return
+`404` rather than silently creating an empty store.
+
+## Change feed
+
+Every document and task mutation appends a monotonic event. Agents can resume via
+`list_changes(since=...)` / `GET /changes?since=...` or stream live updates from
+`GET /changes/stream` (SSE). Cursors are opaque and bound to the `(workspace,
+kind)` filter that produced them.
 MD
 
 cat > "$WORK/agent-setup.md" <<'MD'
@@ -177,6 +203,9 @@ Replace `<base>` with this instance's URL (`http://127.0.0.1:8770` by default).
 claude mcp add --transport http --scope user tracker <base>/mcp \
   --header "X-Actor: claude-code-<host>"
 ```
+
+Add `--header "X-Workspace: <workspace>"` to pin the connection to a specific
+workspace instead of the server default.
 
 ## Cursor (`~/.cursor/mcp.json`)
 
@@ -204,14 +233,17 @@ Any MCP client that speaks Streamable HTTP works: point its HTTP config (`url`,
 
 Name yourself `<tool>-<host>` (e.g. `claude-code-laptop`). Every write records it:
 document author, lease owner, task claimant. It is **self-asserted attribution**,
-not authentication — on a trusted network that is the point. If the server has
-`API_TOKENS` set, also send `Authorization: Bearer <token>`; that gates *access*,
-while `X-Actor` records *identity*.
+not authentication — on a trusted network that is the point (`REQUIRE_ACTOR=true`
+can also require `X-Actor` on reads without turning on token auth). If the server
+has `API_TOKENS` set, also send `Authorization: Bearer <token>`; that gates
+*access*, while `X-Actor` records *identity*.
 
 ## Gotchas
 
 - MCP tools load at session start: after registering, they appear in your **next**
   session. A running session can fall back to curl against the REST API.
+- Empty search? Check `list_workspaces()` — you may be pointed at a different
+  workspace than the one holding your docs.
 - Folio files have multi-segment slugs (`<folio>/<file>.md`) and work by slug
   everywhere. The one exception: a file literally named `raw`, `lock`,
   `soft-delete`, or `restore` collides with those routes — address it via
