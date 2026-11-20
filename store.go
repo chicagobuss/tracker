@@ -640,14 +640,14 @@ func (s *Store) CreateDocument(ctx context.Context, slug, title, kind string, ta
 		values (current_setting('app.workspace'), $1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, 1, $10, $10,
 			to_tsvector('english', $2 || ' ' || left($11, 100000)))
 		returning `+docSelect, slug, title, kind, tags, string(metadata), key, hash,
-		contentType, int64(len(content)), by, string(content))
+		contentType, int64(len(content)), by, searchText(contentType, content))
 	doc, err := scanDoc(row)
 	if err != nil {
 		return nil, normalizeCreateError(err)
 	}
 	if _, err := tx.Exec(ctx, `
-		insert into document_revisions (document_id, version, content_key, content_hash, size_bytes, author)
-		values ($1, 1, $2, $3, $4, $5)`, doc.ID, key, hash, int64(len(content)), by); err != nil {
+		insert into document_revisions (document_id, version, content_key, content_hash, size_bytes, author, content_type)
+		values ($1, 1, $2, $3, $4, $5, $6)`, doc.ID, key, hash, int64(len(content)), by, contentType); err != nil {
 		return nil, err
 	}
 	if _, err := tx.Exec(ctx, `
@@ -768,8 +768,9 @@ func (s *Store) PatchDocument(ctx context.Context, idOrSlug string, p DocPatch, 
 	var tags []string
 	var meta json.RawMessage
 	var deletedAt *time.Time
-	err = tx.QueryRow(ctx, `select id, title, kind, tags, metadata, coalesce(content_key,''), deleted_at from documents where `+idClause+` for update`, idOrSlug).
-		Scan(&id, &title, &kind, &tags, &meta, &contentKey, &deletedAt)
+	var contentType string
+	err = tx.QueryRow(ctx, `select id, title, kind, tags, metadata, coalesce(content_key,''), coalesce(content_type,''), deleted_at from documents where `+idClause+` for update`, idOrSlug).
+		Scan(&id, &title, &kind, &tags, &meta, &contentKey, &contentType, &deletedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	} else if err != nil {
@@ -800,12 +801,12 @@ func (s *Store) PatchDocument(ctx context.Context, idOrSlug string, p DocPatch, 
 		// which means re-reading the content text the index also covers.
 		title = *p.Title
 		ftsInput := title
-		if contentKey != "" {
+		if contentKey != "" && isTextType(contentType) {
 			text, err := s.readBlobText(ctx, contentKey, 100000)
 			if err != nil {
 				return nil, err
 			}
-			ftsInput += " " + text
+			ftsInput += " " + searchText(contentType, []byte(text))
 		}
 		ftsSet = `, fts = to_tsvector('english', $7)`
 		args = []any{id, tags, string(meta), title, kind, by, ftsInput}
@@ -1062,14 +1063,14 @@ func (s *Store) WriteContent(ctx context.Context, docID, owner, leaseToken strin
 			content_type = $5, version = version + 1, updated_by = $6, updated_at = now(),
 			fts = to_tsvector('english', title || ' ' || left($7, 100000))
 		where id = $1
-		returning `+docSelect, id, key, hash, int64(len(data)), contentType, owner, string(data))
+		returning `+docSelect, id, key, hash, int64(len(data)), contentType, owner, searchText(contentType, data))
 	doc, err := scanDoc(row)
 	if err != nil {
 		return nil, err
 	}
 	if _, err := tx.Exec(ctx, `
-		insert into document_revisions (document_id, version, content_key, content_hash, size_bytes, author)
-		values ($1, $2, $3, $4, $5, $6)`, id, doc.Version, key, hash, int64(len(data)), owner); err != nil {
+		insert into document_revisions (document_id, version, content_key, content_hash, size_bytes, author, content_type)
+		values ($1, $2, $3, $4, $5, $6, $7)`, id, doc.Version, key, hash, int64(len(data)), owner, contentType); err != nil {
 		return nil, err
 	}
 	if _, err := tx.Exec(ctx, `
@@ -1280,6 +1281,7 @@ func (s *Store) PresignGet(ctx context.Context, contentKey string, ttl time.Dura
 // Revision is one entry in a document's version history. Old content blobs are
 // retained (content-addressed), so any past version stays fetchable.
 type Revision struct {
+	ContentType string    `json:"content_type"`
 	Version     int       `json:"version"`
 	ContentHash string    `json:"content_hash"`
 	SizeBytes   int64     `json:"size_bytes"`
@@ -1290,7 +1292,7 @@ type Revision struct {
 // DocRevisions lists a document's versions newest-first.
 func (s *Store) DocRevisions(ctx context.Context, idOrSlug string) ([]Revision, error) {
 	rows, err := s.q(ctx).Query(ctx, `
-		select r.version, r.content_hash, r.size_bytes, coalesce(r.author,''), r.created_at
+		select r.version, r.content_hash, r.size_bytes, coalesce(r.author,''), r.created_at, coalesce(r.content_type, d.content_type)
 		from document_revisions r join documents d on d.id = r.document_id
 		where (d.id::text = $1 or d.slug = $1)
 		order by r.version desc`, idOrSlug)
@@ -1301,7 +1303,7 @@ func (s *Store) DocRevisions(ctx context.Context, idOrSlug string) ([]Revision, 
 	out := []Revision{}
 	for rows.Next() {
 		var rv Revision
-		if err := rows.Scan(&rv.Version, &rv.ContentHash, &rv.SizeBytes, &rv.Author, &rv.CreatedAt); err != nil {
+		if err := rows.Scan(&rv.Version, &rv.ContentHash, &rv.SizeBytes, &rv.Author, &rv.CreatedAt, &rv.ContentType); err != nil {
 			return nil, err
 		}
 		out = append(out, rv)
@@ -1313,7 +1315,7 @@ func (s *Store) DocRevisions(ctx context.Context, idOrSlug string) ([]Revision, 
 // so its bytes can be streamed from the retained content-addressed store.
 func (s *Store) RevisionContent(ctx context.Context, idOrSlug string, version int) (key, contentType string, err error) {
 	err = s.q(ctx).QueryRow(ctx, `
-		select r.content_key, d.content_type
+		select r.content_key, coalesce(r.content_type, d.content_type)
 		from document_revisions r join documents d on d.id = r.document_id
 		where (d.id::text = $1 or d.slug = $1) and r.version = $2`, idOrSlug, version).Scan(&key, &contentType)
 	if errors.Is(err, pgx.ErrNoRows) {

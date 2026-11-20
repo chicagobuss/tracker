@@ -66,6 +66,17 @@ knobs live in `.env`:
   `scripts/import_gists.py`). The built-in UI supports dark/light themes,
   full-text search, a collapsible sidebar, a **Rendered / Raw** toggle,
   clipboard copy, shareable revision links, and workspace switching.
+- **Attachments.** Any file can be a document: images, PDFs, archives. Upload
+  in one call with `content_base64` (MCP `create_doc` / `add_folio_file` /
+  `update_doc`, or REST `POST /docs` / `POST /folios/{slug}/files`); the type
+  defaults from the filename. Non-text uploads return an `embed` with Markdown
+  to paste into another document. Images and PDFs have inline previews.
+  Use **📎 Attach**, drop files, or paste a screenshot to upload to the current
+  folio. With no folio open, files go into **Attachments**. Search matches
+  text documents by title or content and attachments by title. For attachments,
+  `get_doc` returns `content_url` and `embed`. Use `get_raw` for base64 up to
+  8 MiB or fetch `content_url` for larger files.
+  Served HTML, SVG and XML are sandboxed so an upload can't run as the site.
 - **Two-layer write safety (leases + CAS).** A `PUT` write requires both (a) a
   live TTL'd `doc_locks` lease (`X-Lease-Token`) and (b) `If-Match: <version>`
   optimistic concurrency. Crashed agents' leases expire automatically. Over MCP,
@@ -156,7 +167,7 @@ automatically.
 |---|---|---|
 | `GET` | `/healthz` · `/version` · `/openapi.yaml` · `/llms.txt` | health (pings Postgres), version, OpenAPI spec, agent cheatsheet |
 | `POST` | `/mcp` | native Streamable HTTP MCP endpoint |
-| `POST · GET` | `/docs` | create (`content` seeds v1); list/search (`?q=&mode=&kind=&tag=&deleted=&view=&limit=&offset=`) |
+| `POST · GET` | `/docs` | create (`content` or `content_base64` seeds v1); list/search (`?q=&mode=&kind=&tag=&deleted=&view=&limit=&offset=`) |
 | `GET · PUT · PATCH · DELETE` | `/docs/{id}` | read; write bytes (`X-Lease-Token` + `If-Match`); relabel; hard-delete (`confirm` = exact slug) |
 | `POST` | `/docs/{id}/soft-delete` · `/docs/{id}/restore` | recoverable delete (`cascade=true` for non-empty folios) · restore |
 | `GET` | `/docs/{id}/raw` · `/docs/{id}/revisions[/{v}/raw]` | content bytes · revision history |

@@ -12,6 +12,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -163,6 +164,28 @@ func (a targs) str(k string) string {
 	return v
 }
 
+// Check the JSON types before decoding. An omitted field leaves the document
+// unseeded, while an explicitly empty string represents zero bytes.
+func (a targs) contentBytes() ([]byte, error) {
+	var plain, encoded *string
+	for _, field := range []string{"content", "content_base64"} {
+		value, present := a[field]
+		if !present {
+			continue
+		}
+		s, ok := value.(string)
+		if !ok {
+			return nil, fmt.Errorf("%s must be a string", field)
+		}
+		if field == "content" {
+			plain = &s
+		} else {
+			encoded = &s
+		}
+	}
+	return contentArgs(plain, encoded)
+}
+
 func (a targs) num(k string, def int) int {
 	if v, ok := a[k].(float64); ok {
 		return int(v)
@@ -312,24 +335,44 @@ func (s *Server) docWithExtras(ctx context.Context, doc *Document, includeConten
 		resp["lock"] = map[string]any{"owner": l.Owner, "expires_at": l.ExpiresAt}
 	}
 	if includeContent && doc.ContentKey != "" {
-		content, err := s.readContent(ctx, doc.ContentKey)
+		if doc.SizeBytes > maxInlineContent {
+			resp["content_omitted"] = "content exceeds the 8 MiB inline limit; fetch content_url"
+			return withEmbed(resp, doc, requestWorkspace(ctx).name), nil
+		}
+		if !isTextType(doc.ContentType) {
+			// Inlined bytes would only flood the caller's context; hand back where
+			// to get them and how to reference them instead.
+			resp["content_omitted"] = fmt.Sprintf("%s attachment (%d bytes): fetch content_url, or get_raw for base64", doc.ContentType, doc.SizeBytes)
+			return withEmbed(resp, doc, requestWorkspace(ctx).name), nil
+		}
+		content, err := s.readContent(ctx, doc)
 		if err != nil {
 			return nil, err
 		}
 		resp["content"] = content
 	}
-	return resp, nil
+	return withEmbed(resp, doc, requestWorkspace(ctx).name), nil
 }
 
-func (s *Server) readContent(ctx context.Context, key string) (string, error) {
-	rc, err := s.store.GetContent(ctx, key)
+const maxInlineContent = 8 << 20
+
+var errContentTooLarge = errors.New("content exceeds the 8 MiB inline limit; fetch content_url from get_doc")
+
+func (s *Server) readContent(ctx context.Context, doc *Document) (string, error) {
+	if doc.SizeBytes > maxInlineContent {
+		return "", errContentTooLarge
+	}
+	rc, err := s.store.GetContent(ctx, doc.ContentKey)
 	if err != nil {
 		return "", err
 	}
 	defer rc.Close()
-	b, err := io.ReadAll(io.LimitReader(rc, 8<<20))
+	b, err := io.ReadAll(io.LimitReader(rc, maxInlineContent+1))
 	if err != nil {
 		return "", err
+	}
+	if len(b) > maxInlineContent {
+		return "", errContentTooLarge
 	}
 	return string(b), nil
 }
@@ -374,7 +417,7 @@ var mcpTools = map[string]mcpTool{
 		},
 	},
 	"get_raw": {
-		desc:   "Get a document's raw text content by UUID or slug.",
+		desc:   "Get a document's raw content by UUID or slug: text as content, anything else (images, PDFs) as content_base64. For more than 8 MiB, fetch content_url from get_doc.",
 		schema: obj([]string{"id"}, map[string]any{"id": pStr}),
 		fn: func(ctx context.Context, s *Server, _ string, a targs) (any, error) {
 			doc, err := s.store.GetDocument(ctx, a.str("id"))
@@ -384,41 +427,53 @@ var mcpTools = map[string]mcpTool{
 			if doc.ContentKey == "" {
 				return nil, errors.New("document has no content yet")
 			}
-			content, err := s.readContent(ctx, doc.ContentKey)
+			content, err := s.readContent(ctx, doc)
 			if err != nil {
 				return nil, err
+			}
+			if !isTextType(doc.ContentType) {
+				return map[string]any{"content_base64": base64.StdEncoding.EncodeToString([]byte(content)),
+					"content_type": doc.ContentType, "version": doc.Version}, nil
 			}
 			return map[string]any{"content": content, "content_type": doc.ContentType, "version": doc.Version}, nil
 		},
 	},
 	"create_doc": {
-		desc:     "Create a document. content (optional) seeds version 1.",
+		desc:     "Create a document. content (text) or content_base64 (any file: images, PDFs) seeds version 1; a base64 upload's content_type defaults from the slug's extension. Attachments come back with an embed: markdown to paste into another doc.",
 		mutating: true,
 		schema: obj([]string{"slug"}, map[string]any{"slug": pStr, "title": pStr, "kind": pStr,
-			"tags": pStrs, "metadata": pObj, "content": pStr, "content_type": pStr}),
+			"tags": pStrs, "metadata": pObj, "content": pStr, "content_base64": pStr, "content_type": pStr}),
 		fn: func(ctx context.Context, s *Server, actor string, a targs) (any, error) {
 			title := a.str("title")
 			if title == "" {
 				title = a.str("slug")
 			}
-			var content []byte
-			if c := a.str("content"); c != "" {
-				content = []byte(c)
-			}
-			doc, err := s.store.CreateDocument(ctx, a.str("slug"), title, a.str("kind"), a.strs("tags"),
-				a.raw("metadata"), content, a.str("content_type"), actor)
+			content, err := a.contentBytes()
 			if err != nil {
 				return nil, err
 			}
-			return map[string]any{"document": doc}, nil
+			content, ctype := seedContent(content, a["content_base64"] != nil, a.str("content_type"), a.str("slug"))
+			doc, err := s.store.CreateDocument(ctx, a.str("slug"), title, a.str("kind"), a.strs("tags"),
+				a.raw("metadata"), content, ctype, actor)
+			if err != nil {
+				return nil, err
+			}
+			return withEmbed(map[string]any{"document": doc}, doc, requestWorkspace(ctx).name), nil
 		},
 	},
 	"update_doc": {
-		desc:     "Safely replace a document's content: acquires the write-lease, writes with the version check, releases. Fails without writing if another agent holds the lease or the version moved.",
+		desc:     "Safely replace a document's content (supply exactly one of content for text or content_base64 for any file): acquires the write-lease, writes with the version check, releases. Fails without writing if another agent holds the lease or the version moved.",
 		mutating: true,
-		schema: obj([]string{"id", "content"}, map[string]any{"id": pStr, "content": pStr,
+		schema: obj([]string{"id"}, map[string]any{"id": pStr, "content": pStr, "content_base64": pStr,
 			"content_type": pStr, "ttl_seconds": pInt, "reason": pStr}),
 		fn: func(ctx context.Context, s *Server, actor string, a targs) (any, error) {
+			data, err := a.contentBytes()
+			if err != nil {
+				return nil, err
+			}
+			if data == nil {
+				return nil, errors.New("update_doc requires content or content_base64")
+			}
 			doc, err := s.store.GetDocument(ctx, a.str("id"))
 			if err != nil {
 				return nil, err
@@ -437,17 +492,20 @@ var mcpTools = map[string]mcpTool{
 			}
 			defer func() { _ = s.store.ReleaseLease(context.WithoutCancel(ctx), doc.ID, lease.LeaseToken) }()
 			ctype := a.str("content_type")
+			if ctype == "" && a["content_base64"] != nil {
+				ctype = uploadType("", doc.Slug, data)
+			}
 			if ctype == "" {
 				ctype = doc.ContentType
 			}
-			updated, err := s.store.WriteContent(ctx, doc.ID, actor, lease.LeaseToken, doc.Version, ctype, []byte(a.str("content")))
+			updated, err := s.store.WriteContent(ctx, doc.ID, actor, lease.LeaseToken, doc.Version, ctype, data)
 			if errors.Is(err, ErrVersionConflict) {
 				return nil, errors.New("version changed under you; re-read and retry")
 			}
 			if err != nil {
 				return nil, err
 			}
-			return map[string]any{"ok": true, "document": updated}, nil
+			return withEmbed(map[string]any{"ok": true, "document": updated}, updated, requestWorkspace(ctx).name), nil
 		},
 	},
 	"lock_status": {
@@ -643,10 +701,10 @@ var mcpTools = map[string]mcpTool{
 		},
 	},
 	"add_folio_file": {
-		desc:     "Add a file (document) to a folio; the folio: tag and <folio>/<filename> slug are applied server-side. Pass tags to set them at creation — metadata is not searchable by tag.",
+		desc:     "Add a file (document) to a folio; the folio: tag and <folio>/<filename> slug are applied server-side. content is text; content_base64 attaches any file (image, PDF) with its type taken from the filename. Attachments come back with an embed: markdown to paste into a doc. Pass tags to set them at creation — metadata is not searchable by tag.",
 		mutating: true,
 		schema: obj([]string{"slug", "filename"}, map[string]any{"slug": pStr, "filename": pStr,
-			"title": pStr, "kind": pStr, "tags": pStrs, "content": pStr, "content_type": pStr, "metadata": pObj}),
+			"title": pStr, "kind": pStr, "tags": pStrs, "content": pStr, "content_base64": pStr, "content_type": pStr, "metadata": pObj}),
 		fn: func(ctx context.Context, s *Server, actor string, a targs) (any, error) {
 			folio, err := s.store.GetDocument(ctx, a.str("slug"))
 			if err != nil {
@@ -667,16 +725,17 @@ var mcpTools = map[string]mcpTool{
 				title = a.str("filename")
 			}
 			meta := withMeta(a.raw("metadata"), map[string]any{"filename": a.str("filename"), "folio": folio.Slug})
-			var content []byte
-			if c := a.str("content"); c != "" {
-				content = []byte(c)
-			}
-			doc, err := s.store.CreateDocument(ctx, folio.Slug+"/"+a.str("filename"), title, kind,
-				folioTags(folio.Slug, a.strs("tags")), meta, content, a.str("content_type"), actor)
+			content, err := a.contentBytes()
 			if err != nil {
 				return nil, err
 			}
-			return map[string]any{"document": doc}, nil
+			content, ctype := seedContent(content, a["content_base64"] != nil, a.str("content_type"), a.str("filename"))
+			doc, err := s.store.CreateDocument(ctx, folio.Slug+"/"+a.str("filename"), title, kind,
+				folioTags(folio.Slug, a.strs("tags")), meta, content, ctype, actor)
+			if err != nil {
+				return nil, err
+			}
+			return withEmbed(map[string]any{"document": doc}, doc, requestWorkspace(ctx).name), nil
 		},
 	},
 	"list_tasks": {

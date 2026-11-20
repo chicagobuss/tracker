@@ -297,6 +297,9 @@ func summaryView(docs []Document) []map[string]any {
 			"tags": d.Tags, "size_bytes": d.SizeBytes, "version": d.Version,
 			"updated_at": d.UpdatedAt,
 		}
+		if d.ContentKey != "" && !isTextType(d.ContentType) {
+			m["content_type"] = d.ContentType // attachments only; text is the default
+		}
 		if d.DeletedAt != nil {
 			m["deleted_at"] = d.DeletedAt
 			m["deleted_by"] = d.DeletedBy
@@ -358,6 +361,10 @@ func (s *Server) serveBlob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer rc.Close()
+	// Blob URLs carry no content type of their own, so the browser would sniff
+	// one; never let uploaded HTML run with this origin's access.
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Security-Policy", "sandbox")
 	// Files, minio objects and unpacked blobs are all ReadSeekers, so ServeContent
 	// gives range requests and content sniffing for every backend.
 	if rs, ok := rc.(io.ReadSeeker); ok {
@@ -389,23 +396,26 @@ func (s *Server) createDoc(w http.ResponseWriter, r *http.Request) {
 		Kind        string          `json:"kind"`
 		Tags        []string        `json:"tags"`
 		Metadata    json.RawMessage `json:"metadata"`
-		Content     string          `json:"content"`
+		Content     *string         `json:"content"`
+		ContentB64  *string         `json:"content_base64"`
 		ContentType string          `json:"content_type"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Slug == "" {
 		badRequest(w, "json body with non-empty 'slug' required")
 		return
 	}
-	var content []byte
-	if in.Content != "" {
-		content = []byte(in.Content)
+	content, err := contentArgs(in.Content, in.ContentB64)
+	if err != nil {
+		badRequest(w, err.Error())
+		return
 	}
-	doc, err := s.store.CreateDocument(r.Context(), in.Slug, in.Title, in.Kind, in.Tags, in.Metadata, content, in.ContentType, actor)
+	content, ctype := seedContent(content, in.ContentB64 != nil, in.ContentType, in.Slug)
+	doc, err := s.store.CreateDocument(r.Context(), in.Slug, in.Title, in.Kind, in.Tags, in.Metadata, content, ctype, actor)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"document": doc})
+	writeJSON(w, http.StatusCreated, withEmbed(map[string]any{"document": doc}, doc, requestWorkspace(r.Context()).name))
 }
 
 func (s *Server) listDocs(w http.ResponseWriter, r *http.Request) {
@@ -566,7 +576,7 @@ func (s *Server) putDoc(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"document": doc})
+	writeJSON(w, http.StatusOK, withEmbed(map[string]any{"document": doc}, doc, requestWorkspace(r.Context()).name))
 }
 
 // rawDoc streams a document's content bytes (same-origin; the UI uses this).
@@ -590,7 +600,7 @@ func (s *Server) streamContent(w http.ResponseWriter, r *http.Request, idOrSlug 
 		return
 	}
 	defer rc.Close()
-	w.Header().Set("Content-Type", doc.ContentType)
+	setContentHeaders(w, doc.ContentType, doc.Slug)
 	_, _ = io.Copy(w, rc)
 }
 
@@ -654,7 +664,7 @@ func (s *Server) rawRevisionID(w http.ResponseWriter, r *http.Request, id string
 		return
 	}
 	defer rc.Close()
-	w.Header().Set("Content-Type", ctype)
+	setContentHeaders(w, ctype, "")
 	_, _ = io.Copy(w, rc)
 }
 
@@ -754,7 +764,8 @@ func (s *Server) createFolioFile(w http.ResponseWriter, r *http.Request) {
 		Title       string          `json:"title"`
 		Kind        string          `json:"kind"`
 		Tags        []string        `json:"tags"`
-		Content     string          `json:"content"`
+		Content     *string         `json:"content"`
+		ContentB64  *string         `json:"content_base64"`
 		ContentType string          `json:"content_type"`
 		Metadata    json.RawMessage `json:"metadata"`
 	}
@@ -771,17 +782,19 @@ func (s *Server) createFolioFile(w http.ResponseWriter, r *http.Request) {
 		title = in.Filename
 	}
 	meta := withMeta(in.Metadata, map[string]any{"filename": in.Filename, "folio": folio.Slug})
-	var content []byte
-	if in.Content != "" {
-		content = []byte(in.Content)
+	content, err := contentArgs(in.Content, in.ContentB64)
+	if err != nil {
+		badRequest(w, err.Error())
+		return
 	}
+	content, ctype := seedContent(content, in.ContentB64 != nil, in.ContentType, in.Filename)
 	doc, err := s.store.CreateDocument(r.Context(), folio.Slug+"/"+in.Filename, title, kind,
-		folioTags(folio.Slug, in.Tags), meta, content, in.ContentType, actor)
+		folioTags(folio.Slug, in.Tags), meta, content, ctype, actor)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"document": doc})
+	writeJSON(w, http.StatusCreated, withEmbed(map[string]any{"document": doc}, doc, requestWorkspace(r.Context()).name))
 }
 
 // getFolioFile addresses a folio member by name (so files whose slug contains a

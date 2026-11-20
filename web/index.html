@@ -118,6 +118,19 @@
   #copybtn { font:inherit; min-width:6.5em; padding:.2rem .5rem; white-space:nowrap; }
   #copybtn:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
   .md h1,.md h2,.md h3 { line-height:1.25; }
+  .md img { max-width:100%; height:auto; }
+  .attachment { margin:.2rem 0 1rem; }
+  .attachment img { max-width:100%; max-height:75vh; border:1px solid var(--border); border-radius:6px; background:var(--input-bg); }
+  .attachment iframe { width:100%; height:75vh; border:1px solid var(--border); border-radius:6px; }
+  .filecard { display:flex; align-items:center; gap:.8rem; padding:.7rem .9rem; border:1px solid var(--border); border-radius:6px; background:var(--panel); }
+  .filecard .icon { font-size:1.6rem; }
+  .filecard a { color:var(--accent); }
+  .card-preview img { max-height:140px; max-width:100%; border-radius:4px; }
+  .card-preview:has(img) { mask-image:none; -webkit-mask-image:none; max-height:none; }
+  #attachbtn, #embedbtn { font:inherit; padding:.2rem .5rem; white-space:nowrap; }
+  #view.dropping { outline:2px dashed var(--accent); outline-offset:-8px; }
+  #notice { position:fixed; bottom:1rem; right:1rem; max-width:32rem; padding:.6rem .9rem; border-radius:6px; background:var(--panel); border:1px solid var(--accent); box-shadow:0 2px 10px rgba(0,0,0,.25); display:none; z-index:50; max-height:70vh; overflow:auto; overflow-wrap:anywhere; }
+  #notice pre { white-space:pre-wrap; user-select:all; }
   .md pre { background:var(--input-bg); border:1px solid var(--border); padding:.7rem; border-radius:6px; overflow:auto; }
   .md code { background:var(--input-bg); padding:.1rem .3rem; border-radius:4px; }
   .md pre code { background:none; padding:0; }
@@ -324,6 +337,7 @@
     <button id="sidebar-toggle" title="Hide sidebar" aria-label="Hide sidebar" aria-controls="sidebar" aria-expanded="true">‹</button>
   </div>
   <div id="view"></div>
+  <div id="notice" role="status"></div>
 </main>
 <script>
 const $ = s => document.querySelector(s);
@@ -480,6 +494,7 @@ workspaceSelect.addEventListener("change", () => {
 });
 
 let active = null, activeSlug = null, activeFolio = null, scope = "all";
+let activeDoc = null;
 function human(n) { n = +n || 0; return n < 1024 ? n + " B" : (n / 1024).toFixed(1) + " kb"; }
 
 // --- routing -----------------------------------------------------------------
@@ -493,6 +508,207 @@ function human(n) { n = +n || 0; return n < 1024 ? n + " B" : (n / 1024).toFixed
 // the slash readable as a separator while still escaping spaces and the like.
 const encSlug = s => String(s).split("/").map(encodeURIComponent).join("/");
 const decSlug = s => String(s).split("/").map(decodeURIComponent).join("/");
+
+// Attachments: anything that isn't text is stored byte for byte and shown as an
+// image, a PDF or a download card. Mirrors isTextType on the server.
+const mediaType = ct => (ct || "").split(";")[0].trim().toLowerCase();
+const isImage = ct => mediaType(ct).startsWith("image/");
+const isText = ct => !ct || (!isImage(ct) && /^(text\/|application\/(json|xml|yaml|x-yaml|toml|javascript|x-ndjson|sql)$)|\+(json|xml|yaml)$/.test(mediaType(ct)));
+// Only these formats may open as a page or use a same-origin blob preview.
+const rasterTypes = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "image/avif", "image/bmp", "image/x-icon", "image/vnd.microsoft.icon", "image/apng"]);
+const canOpenFile = ct => mediaType(ct) === "application/pdf" || rasterTypes.has(mediaType(ct));
+const fileIcon = ct => isText(ct) ? "📄" : isImage(ct) ? "🖼" : "📎";
+const wsParam = () => { const ws = headers()["X-Workspace"]; return ws ? "?workspace=" + encodeURIComponent(ws) : ""; };
+// By UUID, like the server's embeds: survives renames and needs no slug escaping.
+const rawSrc = d => "/docs/" + encodeURIComponent(d.id) + "/raw" + wsParam();
+// Markdown link parts: a destination with nothing that ends or breaks it, and a
+// label escaped just enough to stay one label. Image alt text is shown verbatim
+// (marked keeps other backslashes there); link text also needs emphasis escaped.
+const mdDest = u => u.replace(/[\s()<>\\`]/g, c => "%" + c.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0"));
+const mdLabel = (t, image) => String(t).replace(/\s+/g, " ").replace(image ? /[\\\[\]]/g : /[\\\[\]*_`]/g, "\\$&");
+function embedFor(d, src = rawSrc(d)) {
+  const image = isImage(d.content_type);
+  return `${image ? "!" : ""}[${mdLabel(d.title || d.slug.split("/").pop(), image)}](${mdDest(src)})`;
+}
+
+// Files are fetched with the UI's own headers: bearer token, actor (servers with
+// REQUIRE_ACTOR gate reads on it) and workspace. An <img>, <iframe> or link can
+// send none of those, so they get a blob: URL instead. One fetch per URL per view;
+// the URLs are revoked when the view changes.
+let fileCache = new Map();
+function releaseFiles() {
+  for (const p of fileCache.values()) p.then(f => f.url && URL.revokeObjectURL(f.url), () => {});
+  fileCache = new Map();
+}
+// The server honours X-Workspace over ?workspace=, so a URL that names its
+// workspace (an embed from another workspace) must send that one, not the UI's.
+function fileHeaders(src) {
+  const h = headers();
+  const ws = new URL(src, location.origin).searchParams.get("workspace");
+  if (ws) h["X-Workspace"] = ws;
+  return h;
+}
+async function fetchFile(src) {
+  if (!sameOriginFile(src)) throw new Error("Expected a local Tracker file URL");
+  if (!fileCache.has(src)) {
+    fileCache.set(src, (async () => {
+      const r = await fetch(src, { headers: fileHeaders(src), mode: "same-origin", redirect: "error" });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const blob = await r.blob();
+      const type = mediaType(blob.type);
+      return { blob, type, url: canOpenFile(type) ? URL.createObjectURL(blob) : null };
+    })());
+  }
+  return fileCache.get(src);
+}
+// Save a file to disk. Active types are re-typed so the browser can't render them.
+async function downloadFile(src, name) {
+  const f = await fetchFile(src);
+  // A name taken from link text may lack an extension; take it from the type.
+  if (!/\.[a-z0-9]{1,8}$/i.test(name) && f.type.includes("/"))
+    name += "." + f.type.split("/")[1].split("+")[0].replace("jpeg", "jpg").replace("plain", "txt");
+  const blob = f.blob.slice(0, f.blob.size, "application/octet-stream");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+}
+// Open a file in a new tab. The tab is opened during the click (so it isn't
+// blocked as a popup) and pointed at the bytes once they arrive; active types
+// are downloaded instead.
+async function openFile(src, name) {
+  const tab = window.open("", "_blank");
+  try {
+    const f = await fetchFile(src);
+    if (!f.url) { if (tab) tab.close(); return downloadFile(src, name); }
+    if (tab) { tab.opener = null; tab.location = f.url; }
+  } catch (e) { if (tab) tab.close(); notify(`Couldn't open ${esc(name)}: ${esc(e.message)}`); }
+}
+
+function attachmentView(d, src = rawSrc(d)) {
+  const name = d.slug.split("/").pop();
+  const ct = d.content_type || "";
+  const empty = !d.size_bytes;
+  const canOpen = !empty && canOpenFile(ct);
+  const card = `<div class="filecard"><span class="icon">${fileIcon(ct)}</span>
+      <div><strong>${esc(name)}</strong><div class="muted">${esc(ct || "unknown type")} · ${empty ? "empty file" : human(d.size_bytes)}</div></div>
+      ${canOpen ? `<a href="#" data-open="${esc(src)}" data-name="${esc(name)}">open</a>` : ""}
+      <a href="#" data-download="${esc(src)}" data-name="${esc(name)}">download</a></div>`;
+  if (empty) return card;
+  if (isImage(ct)) return `<figure class="attachment"><img data-file="${esc(src)}" alt="${esc(d.title || name)}"></figure>${card}`;
+  if (mediaType(ct) === "application/pdf") return `<div class="attachment"><iframe data-file="${esc(src)}" title="${esc(name)}"></iframe></div>${card}`;
+  return card;
+}
+
+function sameOriginFile(src) {
+  if (!/^\/(docs|blobs)\//.test(src || "")) return false;
+  const url = new URL(src, location.origin);
+  return url.origin === location.origin && /^\/(docs|blobs)\//.test(url.pathname);
+}
+function withWorkspace(u) {
+  if (!u.startsWith("/docs/") || /[?&]workspace=/.test(u) || !wsParam()) return u;
+  return u + (u.includes("?") ? "&" : "?") + wsParam().slice(1);
+}
+function hydrateFiles(root) {
+  if (!root) return;
+  root.querySelectorAll("img[data-file], iframe[data-file]").forEach(async el => {
+    try {
+      const f = await fetchFile(el.dataset.file);
+      if (el.tagName === "IFRAME" && f.type === "application/pdf") el.src = f.url;
+      else if (el.tagName === "IMG" && rasterTypes.has(f.type)) el.src = f.url;
+      else if (el.tagName === "IMG" && isImage(f.type)) {
+        // An SVG viewed separately must never inherit the application's origin.
+        el.src = "data:" + f.type + ";base64," + await fileToBase64(f.blob);
+      } else throw new Error("Unexpected preview type");
+    }
+    catch (e) {
+      if (el.tagName === "IMG") el.alt = (el.alt || "image") + " (couldn't load: " + e.message + ")";
+      else el.replaceWith(Object.assign(document.createElement("div"), { className: "empty", textContent: "Couldn't load file: " + e.message }));
+    }
+  });
+  root.querySelectorAll("[data-open]").forEach(a => a.onclick = e => { e.preventDefault(); openFile(a.dataset.open, a.dataset.name); });
+  root.querySelectorAll("[data-download]").forEach(a => a.onclick = e => {
+    e.preventDefault();
+    downloadFile(a.dataset.download, a.dataset.name).catch(err => notify(`Download failed: ${esc(err.message)}`));
+  });
+  root.querySelectorAll(".md a[href]").forEach(a => {
+    const href = a.getAttribute("href");
+    if (!sameOriginFile(href) || !/\/raw(\?|$)/.test(href)) return;
+    const name = a.textContent.trim() || decodeURIComponent(href.split("?")[0].replace(/\/raw$/, "").split("/").pop());
+    a.onclick = e => { e.preventDefault(); openFile(withWorkspace(href), name); };
+  });
+}
+let noticeTimer = null;
+function notify(html, ms = 6000) {
+  const n = $("#notice");
+  n.innerHTML = html;
+  n.style.display = "block";
+  clearTimeout(noticeTimer);
+  if (ms) noticeTimer = setTimeout(() => { n.style.display = "none"; }, ms);
+}
+async function copyEmbeds(markdown, message = "") {
+  try {
+    await writeClipboard(markdown);
+    notify(message + "Markdown copied.");
+  } catch {
+    notify(message + 'Select and copy this Markdown.<pre></pre><button type="button">Dismiss</button>', 0);
+    $("#notice pre").textContent = markdown;
+    $("#notice button").onclick = () => { $("#notice").style.display = "none"; };
+  }
+}
+const fileToBase64 = f => new Promise((ok, fail) => {
+  const r = new FileReader();
+  r.onload = () => ok(String(r.result).split(",")[1] || "");
+  r.onerror = () => fail(r.error);
+  r.readAsDataURL(f);
+});
+// Upload files next to what's on screen: into the open doc's folio, the open
+// folio, or else a shared "attachments" folio. Returns the uploaded docs.
+async function uploadFiles(files) {
+  files = [...files].filter(f => f && f.size >= 0);
+  if (!files.length) return [];
+  if (!actorBox.value.trim()) { notify("Set an <strong>actor ID</strong> in the top bar to upload."); return []; }
+  const folio = (activeSlug && activeSlug.includes("/") ? activeSlug.split("/")[0] : null) || activeFolio || "attachments";
+  const post = (path, body) => fetch(path, { method: "POST", headers: { ...headers(), "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (folio === "attachments") await post("/folios", { slug: "attachments", title: "Attachments" }); // 409 if it exists: fine
+  const done = [], failed = [];
+  for (const f of files) {
+    if (f.size > 25 << 20) { failed.push(`${esc(f.name)} (over 25 MB)`); continue; }
+    const b64 = await fileToBase64(f);
+    const dot = f.name.lastIndexOf(".");
+    const stem = dot > 0 ? f.name.slice(0, dot) : f.name, ext = dot > 0 ? f.name.slice(dot) : "";
+    for (let n = 1; n <= 20; n++) { // a taken filename gets a -2, -3, … suffix
+      const filename = (n === 1 ? stem : `${stem}-${n}`) + ext;
+      const r = await post("/folios/" + encodeURIComponent(folio) + "/files",
+        { filename, title: filename, kind: "attachment", content_base64: b64, content_type: f.type || "" });
+      const out = await r.json().catch(() => ({}));
+      if (r.status === 409 && out.error?.code === "already_exists") {
+        if (n === 20) failed.push(`${esc(f.name)} (rename this file and try again)`);
+        continue;
+      }
+      if (r.ok) done.push(out.document); else failed.push(`${esc(f.name)} (${esc(out.error ? out.error.message : "HTTP " + r.status)})`);
+      break;
+    }
+  }
+  if (done.length) {
+    const message = `Uploaded ${done.length} file${done.length > 1 ? "s" : ""} to ${esc(folio)}. `
+      + (failed.length ? `Failed: ${failed.join(", ")}. ` : "");
+    await copyEmbeds(done.map(d => embedFor(d)).join("\n"), message);
+  } else if (failed.length) notify(`Upload failed: ${failed.join(", ")}`);
+  return done;
+}
+function pickFiles() {
+  const input = document.createElement("input");
+  input.type = "file"; input.multiple = true;
+  input.onchange = async () => { const up = await uploadFiles(input.files); if (up.length) refreshAfterUpload(up); };
+  input.click();
+}
+function refreshAfterUpload(uploaded) {
+  if (activeFolio && !activeSlug) openFolio(activeFolio);
+  else if (!activeSlug) openDoc(uploaded[0].id);
+  else loadList();
+}
 
 // setRoute is a no-op when the hash already says what we want. That's what lets
 // openDoc/openFolio be called both by a click (pushes history) and by applyRoute
@@ -696,7 +912,7 @@ async function populateFolioSublist(slug, sublistEl) {
     for (const fl of files) {
       const subEl = document.createElement("div");
       subEl.className = "sub-item" + (fl.id === active || fl.slug === activeSlug ? " active" : "");
-      subEl.innerText = "📄 " + (fl.title || fl.slug.split("/").pop());
+      subEl.innerText = fileIcon(fl.content_type) + " " + (fl.title || fl.slug.split("/").pop());
       subEl.title = fl.slug;
       subEl.onclick = (e) => {
         e.stopPropagation();
@@ -791,7 +1007,8 @@ async function loadFolios() {
 }
 
 async function openFolio(slug) {
-  activeFolio = slug; active = null; activeSlug = null;
+  activeFolio = slug; active = null; activeSlug = null; activeDoc = null;
+  releaseFiles();
   setRoute("#/folio/" + encSlug(slug));
   loadFolios();
   const view = $("#view");
@@ -804,7 +1021,7 @@ async function openFolio(slug) {
       items = files.map(fl => `
         <div class="folio-file-card" data-id="${fl.id}">
           <div class="card-header">
-            <strong>📄 ${esc(fl.title || fl.slug.split("/").pop())}</strong>
+            <strong>${fileIcon(fl.content_type)} ${esc(fl.title || fl.slug.split("/").pop())}</strong>
             <span class="badge">${esc(fl.kind)}</span>
             <span class="muted">v${fl.version} · ${human(fl.size_bytes)} · updated ${new Date(fl.updated_at).toLocaleDateString()}</span>
           </div>
@@ -822,6 +1039,7 @@ async function openFolio(slug) {
         <strong>📁 ${esc(f.title || f.slug)}</strong>
         <span class="badge">folio</span>
         <span>${files.length} files</span>
+        <div id="doc-actions"><button id="attachbtn" title="Add files to this folio (or drop / paste them here)">📎 Attach</button></div>
       </div>
       ${desc}
       <div class="folio-files-list">${items}</div>
@@ -830,11 +1048,21 @@ async function openFolio(slug) {
     view.querySelectorAll(".folio-file-card").forEach(el => {
       el.onclick = () => openDocInFolio(el.dataset.id, slug);
     });
+    $("#attachbtn").onclick = pickFiles;
     
     files.forEach(async fl => {
       const previewEl = $(`#preview-${fl.id}`);
       if (!previewEl) return;
-      if (!fl.content_key) {
+      // Folio listings are summaries: no content_key, and content_type only on
+      // attachments. Size says whether there is anything to preview.
+      if (!isText(fl.content_type)) {
+        previewEl.innerHTML = !fl.size_bytes ? `<span class="muted">${fileIcon(fl.content_type)} ${esc(fl.content_type)} · empty file</span>`
+          : isImage(fl.content_type) ? `<img data-file="${esc(rawSrc(fl))}" alt="">`
+          : `<span class="muted">📎 ${esc(fl.content_type)} · ${human(fl.size_bytes)}</span>`;
+        hydrateFiles(previewEl);
+        return;
+      }
+      if (!fl.size_bytes) {
         previewEl.innerHTML = `<span class="muted"><i>No content.</i></span>`;
         return;
       }
@@ -858,6 +1086,7 @@ async function openFolio(slug) {
 // revision, e.g. a single agent turn in a fleet pane's history).
 async function openDoc(idOrSlug, version = null) {
   const view = $("#view");
+  releaseFiles();
   try {
     const { document: d, lock: lk } = await (await api("/docs/" + encSlug(idOrSlug))).json();
     const id = d.id;
@@ -867,7 +1096,12 @@ async function openDoc(idOrSlug, version = null) {
     loadList();
     let body = "";
     lastRaw = null;
-    if (d.content_key) {
+    const binary = d.content_key && !isText(d.content_type);
+    if (version) {
+      body = "";
+    } else if (binary) {
+      body = attachmentView(d);
+    } else if (d.content_key) {
       const raw = await (await api("/docs/" + id + "/raw")).text();
       lastRaw = raw;
       body = renderDoc(raw);
@@ -876,12 +1110,6 @@ async function openDoc(idOrSlug, version = null) {
     }
     const lock = lk ? `<span class="badge lock">🔒 ${esc(lk.owner)} until ${new Date(lk.expires_at).toLocaleTimeString()}</span>` : "";
     const hist = d.version > 1 ? `<span class="badge" id="histbtn" title="version history">⟲ history</span>` : "";
-    // Inert when the doc has no content: there is no raw to show.
-    const actions = d.content_key ? `<div id="doc-actions"><button id="rawbtn" role="switch" aria-label="Raw markdown" aria-checked="${rawView}" title="${rawView ? "Show rendered view" : "Show raw markdown"}">
-        <span class="rendered-label">Rendered</span>
-        <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
-        <span class="raw-label">Raw</span>
-      </button><button id="copybtn" title="${rawView ? "Copy raw markdown" : "Copy formatted text"}" aria-live="polite">Copy</button></div>` : "";
     const actor = (d.updated_by || d.created_by) ? `<span>by <strong>${esc(d.updated_by || d.created_by)}</strong></span>` : "";
     const tagsHtml = (d.tags && d.tags.length) ? d.tags.map(t => `<span class="badge">#${esc(t)}</span>`).join(" ") : "";
     // Folio files (slug "folio/file") get a link back to their folio in the
@@ -897,23 +1125,44 @@ async function openDoc(idOrSlug, version = null) {
         <span>updated ${new Date(d.updated_at).toLocaleString()}</span>
         ${actor}
         ${tagsHtml}
-        ${lock}${hist}${actions}
+        ${lock}${hist}<div id="doc-actions"></div>
       </div><div id="histpanel"></div><div id="docbody">${body}</div>`;
     const hb = $("#histbtn");
     if (hb) hb.onclick = () => toggleHistory(id);
     const fl = $("#foliolink");
     if (fl) fl.onclick = () => showFolioFromDoc(folioSlug);
-    const rb = $("#rawbtn");
-    if (rb) rb.onclick = () => toggleRawView(id);
-    const cb = $("#copybtn");
-    if (cb) cb.onclick = copyDoc;
-    if (version && version !== d.version) viewRevision(id, version, d.version);
+    activeDoc = d;
+    if (version) {
+      await viewRevision(id, version, d.version);
+    } else {
+      showDocActions(d, rawSrc(d));
+      hydrateFiles($("#docbody"));
+    }
   } catch (e) {
     view.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
     // A shared link can point at a doc that's gone (or that you can't read without
     // a token). Still populate the list, or the page is a dead end.
     loadList();
   }
+}
+
+function showDocActions(d, src) {
+  const bar = $("#doc-actions");
+  let controls = "";
+  if (d.content_key && !isText(d.content_type)) {
+    controls = '<button id="embedbtn" title="Copy a Markdown reference to this file">Copy embed</button>';
+  } else if (d.content_key) {
+    controls = `<button id="rawbtn" role="switch" aria-label="Raw markdown" aria-checked="${rawView}" title="${rawView ? "Show rendered view" : "Show raw markdown"}">
+      <span class="rendered-label">Rendered</span>
+      <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+      <span class="raw-label">Raw</span>
+    </button><button id="copybtn" title="${rawView ? "Copy raw markdown" : "Copy formatted text"}" aria-live="polite">Copy</button>`;
+  }
+  bar.innerHTML = controls + '<button id="attachbtn" title="Attach files">📎 Attach</button>';
+  $("#attachbtn").onclick = pickFiles;
+  if ($("#embedbtn")) $("#embedbtn").onclick = () => copyEmbeds(embedFor(d, src));
+  if ($("#rawbtn")) $("#rawbtn").onclick = () => toggleRawView(d.id);
+  if ($("#copybtn")) $("#copybtn").onclick = copyDoc;
 }
 
 // History stays deliberately light: a collapsible list of versions; clicking one
@@ -925,32 +1174,54 @@ async function toggleHistory(id) {
   try {
     const { revisions } = await (await api("/docs/" + id + "/revisions")).json();
     const total = revisions.length;
+    const byVersion = new Map(revisions.map(rv => [rv.version, rv]));
     panel.innerHTML = revisions.map((rv, i) =>
       `<div class="lrow" data-v="${rv.version}">
          <span class="badge${i === 0 ? " cur" : ""}">v${rv.version}${i === 0 ? " ·now" : ""}</span>
          <span>${esc(rv.author || "—")}</span>
          <span class="muted">${new Date(rv.created_at).toLocaleString()}</span>
          <span class="muted">${human(rv.size_bytes)}</span>
+         ${rv.content_type && !isText(rv.content_type) ? `<span class="muted">${fileIcon(rv.content_type)} ${esc(rv.content_type)}</span>` : ""}
        </div>`).join("");
     panel.querySelectorAll(".lrow").forEach(el =>
-      el.onclick = () => viewRevision(id, +el.dataset.v, total, el));
+      el.onclick = () => viewRevision(id, +el.dataset.v, total, el, byVersion.get(+el.dataset.v)));
   } catch (e) { panel.innerHTML = `<div class="lrow muted">${esc(e.message)}</div>`; }
 }
 
-async function viewRevision(id, version, total, el) {
+// rev: that version's entry from /revisions ({content_type, size_bytes}); fetched
+// when absent (a deep link). A doc's type can change between versions, so each
+// version is shown as what it was, not as what the doc is now.
+async function viewRevision(id, version, total, el, rev = null) {
   const panel = $("#histpanel");
   panel.querySelectorAll(".lrow").forEach(x => x.classList.remove("active"));
   if (el) el.classList.add("active");
   const bodyEl = $("#docbody");
-  if (activeSlug) setRoute("#/doc/" + encSlug(activeSlug) + "?v=" + version);
+  const doc = activeDoc;
+  const src = `/docs/${id}/revisions/${version}/raw${wsParam()}`;
+  const bar = $("#doc-actions");
+  bodyEl.dataset.version = version;
+  const current = () => bodyEl.isConnected && bodyEl.dataset.version === String(version);
+  setRoute("#/doc/" + encSlug(doc.slug) + "?v=" + version);
+  bar.replaceChildren();
+  bodyEl.textContent = "Loading revision…";
   try {
-    const raw = await (await api(`/docs/${id}/revisions/${version}/raw`)).text();
-    lastRaw = raw; // the toggle re-renders whatever version is on screen
-    bodyEl.innerHTML = `<div class="oldbanner">Viewing <strong>v${version}</strong> of ${total} `
-      + `— <a id="backlatest">back to latest</a></div>`
-      + renderDoc(raw);
+    if (!rev) {
+      const { revisions } = await (await api("/docs/" + id + "/revisions")).json();
+      rev = revisions.find(r => r.version === version);
+      if (!rev) throw new Error("Revision not found");
+    }
+    const meta = { ...doc, content_type: rev.content_type ?? doc.content_type, size_bytes: rev.size_bytes };
+    const raw = isText(meta.content_type) ? await (await api(src)).text() : null;
+    if (!current()) return;
+    lastRaw = raw;
+    bodyEl.innerHTML = `<div class="oldbanner">Viewing <strong>v${version}</strong> of ${total} — <a id="backlatest">back to latest</a></div>`
+      + (raw === null ? attachmentView(meta, src) : renderDoc(raw));
+    showDocActions(meta, src);
+    hydrateFiles(bodyEl);
     $("#backlatest").onclick = () => openDoc(id);
-  } catch (e) { bodyEl.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+  } catch (e) {
+    if (current()) bodyEl.textContent = e.message;
+  }
 }
 
 function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
@@ -1087,9 +1358,13 @@ async function showHelp() {
       ", filter or sort the sidebar locally, or collapse it with ", ["code", "‹"], "."
     ]],
     ["Read, copy & history", [
-      "Flip ", ["strong", "Rendered / Raw"], " on any doc (saved per browser), click ",
+      "Flip ", ["strong", "Rendered / Raw"], " on text documents, click ",
       ["strong", "Copy"], " for rich text or exact markdown, and use ",
       ["strong", "⟲ history"], " to inspect or link past revisions."
+    ]],
+    ["Images & files", [
+      "Set your ", ["strong", "actor ID"], ", then click ", ["strong", "📎 Attach"], ", drop files, or paste a screenshot. Files go into the current folio, or into ",
+      ["strong", "Attachments"], " if no folio is open."
     ]],
     ["Workspaces", [
       "Switch hard-isolated workspaces in the header dropdown. The workspace stays in the URL (",
@@ -1116,7 +1391,7 @@ async function showHelp() {
   const concepts = makeEl("div", "home-concepts");
   const conceptItems = [
     ["Documents & folios", [
-      " — versioned markdown with tags and attribution; folios group related files under ",
+      " — versioned text or file attachments with tags and attribution. Folios group related files under ",
       ["code", "<folio>/<file>"], "."
     ]],
     ["Leases + versions", [
@@ -1236,6 +1511,31 @@ function applySidebar(hidden) {
   sidebarToggle.setAttribute("aria-expanded", String(!hidden));
 }
 applySidebar(localStorage.getItem("tracker_sidebar") === "hidden");
+
+{
+  const view = $("#view");
+  const hasFiles = e => [...(e.dataTransfer?.types || [])].includes("Files");
+  view.addEventListener("dragover", e => { if (hasFiles(e)) { e.preventDefault(); view.classList.add("dropping"); } });
+  view.addEventListener("dragleave", e => { if (e.target === view) view.classList.remove("dropping"); });
+  view.addEventListener("drop", async e => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    view.classList.remove("dropping");
+    const up = await uploadFiles(e.dataTransfer.files);
+    if (up.length) refreshAfterUpload(up);
+  });
+  document.addEventListener("paste", async e => {
+    if (e.target.closest && e.target.closest("input, textarea, [contenteditable]")) return;
+    const files = [...(e.clipboardData?.items || [])].filter(i => i.kind === "file").map(i => i.getAsFile()).filter(Boolean);
+    if (!files.length) return;
+    e.preventDefault();
+    const stamp = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
+    const named = files.map((f, i) => new File([f], f.name && f.name !== "image.png" ? f.name
+      : `pasted-${stamp}${files.length > 1 ? "-" + (i + 1) : ""}.${(f.type.split("/")[1] || "bin").replace("jpeg", "jpg")}`, { type: f.type }));
+    const up = await uploadFiles(named);
+    if (up.length) refreshAfterUpload(up);
+  });
+}
 sidebarToggle.onclick = () => {
   const hidden = !document.body.classList.contains("no-sidebar");
   localStorage.setItem("tracker_sidebar", hidden ? "hidden" : "shown");
@@ -1253,7 +1553,7 @@ let lastRaw = null; // the raw text currently on screen (latest or a revision)
 function renderDoc(raw) {
   return rawView
     ? `<pre class="rawview">${esc(raw)}</pre>`
-    : `<div class="md">${DOMPurify.sanitize(marked.parse(raw))}</div>`;
+    : `<div class="md">${DOMPurify.sanitize(marked.parse(raw), { ALLOW_DATA_ATTR: false })}</div>`;
 }
 function toggleRawView(id) {
   rawView = !rawView;
@@ -1269,6 +1569,7 @@ function toggleRawView(id) {
   if (!bodyEl) return;
   const banner = bodyEl.querySelector(".oldbanner");
   bodyEl.innerHTML = (banner ? banner.outerHTML : "") + renderDoc(lastRaw);
+  hydrateFiles(bodyEl);
   const back = $("#backlatest");
   if (back) back.onclick = () => openDoc(id);
 }
@@ -1304,7 +1605,7 @@ async function copyDoc() {
   }
 }
 
-async function writeClipboard(text, html) {
+async function writeClipboard(text, html = null) {
   // The async API needs a secure context; the copy-event path also works on HTTP.
   try {
     if (html !== null && navigator.clipboard?.write && window.ClipboardItem) {
@@ -1350,6 +1651,13 @@ async function writeClipboard(text, html) {
 }
 
 marked.setOptions({ gfm: true, breaks: false });
+// Same-origin images in markdown never load bare: their source moves to
+// data-file so hydrateFiles fetches them with the UI's headers. A bare <img>
+// would send no token or actor, and on gated servers fail before we could swap it.
+DOMPurify.addHook("afterSanitizeAttributes", n => {
+  const src = n.tagName === "IMG" ? n.getAttribute("src") : null;
+  if (src && sameOriginFile(src)) { n.setAttribute("data-file", withWorkspace(src)); n.removeAttribute("src"); }
+});
 // Start by loading workspaces, then let the URL route open the target item.
 (async () => {
   await loadWorkspaces();
