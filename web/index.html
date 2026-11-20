@@ -509,41 +509,126 @@ const encSlug = s => String(s).split("/").map(encodeURIComponent).join("/");
 const decSlug = s => String(s).split("/").map(decodeURIComponent).join("/");
 
 // Attachments: anything that isn't text is stored byte for byte and shown as an
-// image, a PDF or a download card. Mirrors isTextType on the server.
+// image, a PDF or a download card. Mirrors isTextType on the server, except that
+// images (SVG included) are always images here, never text to render.
 const TEXT_TYPE = /^(text\/|application\/(json|xml|yaml|x-yaml|toml|javascript|x-ndjson|sql)\b)|\+(json|xml|yaml)\b/;
-const isText = ct => !ct || TEXT_TYPE.test(ct);
-const fileIcon = ct => isText(ct) ? "📄" : (ct || "").startsWith("image/") ? "🖼" : "📎";
+const isImage = ct => /^image\//.test(ct || "");
+const isText = ct => !ct || (!isImage(ct) && TEXT_TYPE.test(ct));
+// Types a browser runs as a page. They are shown only through <img> (which never
+// runs script) or downloaded: a blob: URL would run them as this origin, outside
+// the sandbox the server puts on them.
+const ACTIVE_TYPE = /^(text\/html|application\/xhtml\+xml|image\/svg\+xml)\b|[\/+]xml\b/;
+const isActive = ct => ACTIVE_TYPE.test(ct || "");
+const fileIcon = ct => isText(ct) ? "📄" : isImage(ct) ? "🖼" : "📎";
 const wsParam = () => { const ws = headers()["X-Workspace"]; return ws ? "?workspace=" + encodeURIComponent(ws) : ""; };
-const rawSrc = d => "/docs/" + encSlug(d.slug) + "/raw" + wsParam();
+// By UUID, like the server's embeds: survives renames and needs no slug escaping.
+const rawSrc = d => "/docs/" + encodeURIComponent(d.id) + "/raw" + wsParam();
+// Markdown link parts: a destination with nothing that ends or breaks it, and a
+// label escaped just enough to stay one label. Image alt text is shown verbatim
+// (marked keeps other backslashes there); link text also needs emphasis escaped.
+const mdDest = u => u.replace(/[\s()<>\\`]/g, c => "%" + c.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0"));
+const mdLabel = (t, image) => String(t).replace(/\s+/g, " ").replace(image ? /[\\\[\]]/g : /[\\\[\]*_`]/g, "\\$&");
 function embedFor(d) {
-  const label = (d.title || d.slug.split("/").pop()).replace(/[\[\]]/g, "");
-  return (d.content_type || "").startsWith("image/") ? `![${label}](${rawSrc(d)})` : `[${label}](${rawSrc(d)})`;
+  const image = isImage(d.content_type);
+  return `${image ? "!" : ""}[${mdLabel(d.title || d.slug.split("/").pop(), image)}](${mdDest(rawSrc(d))})`;
 }
+
+// Files are fetched with the UI's own headers: bearer token, actor (servers with
+// REQUIRE_ACTOR gate reads on it) and workspace. An <img>, <iframe> or link can
+// send none of those, so they get a blob: URL instead. One fetch per URL per view;
+// the URLs are revoked when the view changes.
+let fileCache = new Map();
+function releaseFiles() {
+  for (const p of fileCache.values()) p.then(f => f && URL.revokeObjectURL(f.url), () => {});
+  fileCache = new Map();
+}
+// The server honours X-Workspace over ?workspace=, so a URL that names its
+// workspace (an embed from another workspace) must send that one, not the UI's.
+function fileHeaders(src) {
+  const h = headers();
+  const ws = new URL(src, location.origin).searchParams.get("workspace");
+  if (ws) h["X-Workspace"] = ws;
+  return h;
+}
+function fetchFile(src) {
+  if (!fileCache.has(src)) {
+    fileCache.set(src, (async () => {
+      const r = await fetch(src, { headers: fileHeaders(src) });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const blob = await r.blob();
+      return { blob, type: (r.headers.get("Content-Type") || blob.type || "").split(";")[0].trim(), url: URL.createObjectURL(blob) };
+    })());
+  }
+  return fileCache.get(src);
+}
+// Save a file to disk. Active types are re-typed so the browser can't render them.
+async function downloadFile(src, name) {
+  const f = await fetchFile(src);
+  // A name taken from link text may lack an extension; take it from the type.
+  if (!/\.[a-z0-9]{1,8}$/i.test(name) && f.type.includes("/"))
+    name += "." + f.type.split("/")[1].split("+")[0].replace("jpeg", "jpg").replace("plain", "txt");
+  const blob = isActive(f.type) ? new Blob([f.blob], { type: "application/octet-stream" }) : f.blob;
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+}
+// Open a file in a new tab. The tab is opened during the click (so it isn't
+// blocked as a popup) and pointed at the bytes once they arrive; active types
+// are downloaded instead.
+async function openFile(src, name) {
+  const tab = window.open("", "_blank");
+  try {
+    const f = await fetchFile(src);
+    if (isActive(f.type)) { if (tab) tab.close(); return downloadFile(src, name); }
+    if (tab) { tab.opener = null; tab.location = f.url; }
+  } catch (e) { if (tab) tab.close(); notify(`Couldn't open ${esc(name)}: ${esc(e.message)}`); }
+}
+
+// d: {slug, title, content_type, size_bytes}; src: where its bytes are served.
 function attachmentView(d, src = rawSrc(d)) {
   const name = d.slug.split("/").pop();
   const ct = d.content_type || "";
+  const empty = !d.size_bytes;
+  const canOpen = !empty && (isImage(ct) && !isActive(ct) || ct === "application/pdf");
   const card = `<div class="filecard"><span class="icon">${fileIcon(ct)}</span>
-      <div><strong>${esc(name)}</strong><div class="muted">${esc(ct)} · ${human(d.size_bytes)}</div></div>
-      <a href="${esc(src)}" target="_blank" rel="noopener">open</a>
-      <a href="${esc(src)}" download="${esc(name)}">download</a></div>`;
-  if (ct.startsWith("image/")) return `<figure class="attachment"><img src="${esc(src)}" alt="${esc(d.title || name)}"></figure>${card}`;
-  if (ct === "application/pdf") return `<div class="attachment"><iframe src="${esc(src)}" title="${esc(name)}"></iframe></div>${card}`;
+      <div><strong>${esc(name)}</strong><div class="muted">${esc(ct || "unknown type")} · ${empty ? "empty file" : human(d.size_bytes)}</div></div>
+      ${canOpen ? `<a href="#" data-open="${esc(src)}" data-name="${esc(name)}">open</a>` : ""}
+      ${empty ? "" : `<a href="#" data-download="${esc(src)}" data-name="${esc(name)}">download</a>`}</div>`;
+  if (empty) return card;
+  if (isImage(ct)) return `<figure class="attachment"><img data-file="${esc(src)}" alt="${esc(d.title || name)}"></figure>${card}`;
+  if (ct === "application/pdf") return `<div class="attachment"><iframe data-file="${esc(src)}" title="${esc(name)}"></iframe></div>${card}`;
   return card;
 }
-// Same-origin images in rendered markdown: send them to the workspace being
-// viewed, and when a token is set fetch them with it (an <img> can't send headers).
-function hydrateImages(root) {
+
+// Wire up a rendered view: attachment previews and card links, plus same-origin
+// images and file links inside rendered markdown (sent to the workspace being
+// viewed, and fetched with the UI's headers like everything else).
+const sameOriginFile = u => /^\/(docs|blobs)\//.test(u || "");
+function withWorkspace(u) {
+  if (!u.startsWith("/docs/") || /[?&]workspace=/.test(u) || !wsParam()) return u;
+  return u + (u.includes("?") ? "&" : "?") + wsParam().slice(1);
+}
+function hydrateFiles(root) {
   if (!root) return;
-  root.querySelectorAll("img").forEach(async img => {
-    const src = img.getAttribute("src") || "";
-    if (!src.startsWith("/docs/") && !src.startsWith("/blobs/")) return;
-    let url = src;
-    if (src.startsWith("/docs/") && !/[?&]workspace=/.test(src) && wsParam()) url += (src.includes("?") ? "&" : "?") + wsParam().slice(1);
-    if (!tokenBox.value.trim()) { if (url !== src) img.src = url; return; }
-    try {
-      const r = await fetch(url, { headers: headers() });
-      if (r.ok) img.src = URL.createObjectURL(await r.blob());
-    } catch (e) {}
+  root.querySelectorAll("[data-file]").forEach(async el => {
+    try { el.src = (await fetchFile(el.dataset.file)).url; }
+    catch (e) {
+      if (el.tagName === "IMG") el.alt = (el.alt || "image") + " (couldn't load: " + e.message + ")";
+      else el.replaceWith(Object.assign(document.createElement("div"), { className: "empty", textContent: "Couldn't load file: " + e.message }));
+    }
+  });
+  root.querySelectorAll("[data-open]").forEach(a => a.onclick = e => { e.preventDefault(); openFile(a.dataset.open, a.dataset.name); });
+  root.querySelectorAll("[data-download]").forEach(a => a.onclick = e => {
+    e.preventDefault();
+    downloadFile(a.dataset.download, a.dataset.name).catch(err => notify(`Download failed: ${esc(err.message)}`));
+  });
+  root.querySelectorAll(".md a[href]").forEach(a => {
+    const href = a.getAttribute("href");
+    if (!sameOriginFile(href) || !/\/raw(\?|$)/.test(href)) return;
+    const name = a.textContent.trim() || decodeURIComponent(href.split("?")[0].replace(/\/raw$/, "").split("/").pop());
+    a.onclick = e => { e.preventDefault(); openFile(withWorkspace(href), name); };
   });
 }
 let noticeTimer = null;
@@ -903,6 +988,7 @@ async function loadFolios() {
 
 async function openFolio(slug) {
   activeFolio = slug; active = null; activeSlug = null; activeDoc = null;
+  releaseFiles();
   setRoute("#/folio/" + encSlug(slug));
   loadFolios();
   const view = $("#view");
@@ -949,14 +1035,15 @@ async function openFolio(slug) {
       if (!previewEl) return;
       // Folio listings are summaries: no content_key, and content_type only on
       // attachments. Size says whether there is anything to preview.
-      if (!fl.size_bytes) {
-        previewEl.innerHTML = `<span class="muted"><i>No content.</i></span>`;
+      if (!isText(fl.content_type)) {
+        previewEl.innerHTML = !fl.size_bytes ? `<span class="muted">${fileIcon(fl.content_type)} ${esc(fl.content_type)} · empty file</span>`
+          : isImage(fl.content_type) ? `<img data-file="${esc(rawSrc(fl))}" alt="">`
+          : `<span class="muted">📎 ${esc(fl.content_type)} · ${human(fl.size_bytes)}</span>`;
+        hydrateFiles(previewEl);
         return;
       }
-      if (!isText(fl.content_type)) {
-        previewEl.innerHTML = (fl.content_type || "").startsWith("image/")
-          ? `<img src="${esc(rawSrc(fl))}" alt="">` : `<span class="muted">📎 ${esc(fl.content_type)} · ${human(fl.size_bytes)}</span>`;
-        hydrateImages(previewEl);
+      if (!fl.size_bytes) {
+        previewEl.innerHTML = `<span class="muted"><i>No content.</i></span>`;
         return;
       }
       try {
@@ -979,6 +1066,7 @@ async function openFolio(slug) {
 // revision, e.g. a single agent turn in a fleet pane's history).
 async function openDoc(idOrSlug, version = null) {
   const view = $("#view");
+  releaseFiles();
   try {
     const { document: d, lock: lk } = await (await api("/docs/" + encSlug(idOrSlug))).json();
     const id = d.id;
@@ -1037,7 +1125,7 @@ async function openDoc(idOrSlug, version = null) {
     if (eb) eb.onclick = async () => { await writeClipboard(embedFor(d)).catch(() => {}); notify(`Embed markdown copied:<br><code>${esc(embedFor(d))}</code>`); };
     $("#attachbtn").onclick = pickFiles;
     activeDoc = d;
-    hydrateImages($("#docbody"));
+    hydrateFiles($("#docbody"));
     if (version && version !== d.version) viewRevision(id, version, d.version);
   } catch (e) {
     view.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
@@ -1056,19 +1144,24 @@ async function toggleHistory(id) {
   try {
     const { revisions } = await (await api("/docs/" + id + "/revisions")).json();
     const total = revisions.length;
+    const byVersion = new Map(revisions.map(rv => [rv.version, rv]));
     panel.innerHTML = revisions.map((rv, i) =>
       `<div class="lrow" data-v="${rv.version}">
          <span class="badge${i === 0 ? " cur" : ""}">v${rv.version}${i === 0 ? " ·now" : ""}</span>
          <span>${esc(rv.author || "—")}</span>
          <span class="muted">${new Date(rv.created_at).toLocaleString()}</span>
          <span class="muted">${human(rv.size_bytes)}</span>
+         ${rv.content_type && !isText(rv.content_type) ? `<span class="muted">${fileIcon(rv.content_type)} ${esc(rv.content_type)}</span>` : ""}
        </div>`).join("");
     panel.querySelectorAll(".lrow").forEach(el =>
-      el.onclick = () => viewRevision(id, +el.dataset.v, total, el));
+      el.onclick = () => viewRevision(id, +el.dataset.v, total, el, byVersion.get(+el.dataset.v)));
   } catch (e) { panel.innerHTML = `<div class="lrow muted">${esc(e.message)}</div>`; }
 }
 
-async function viewRevision(id, version, total, el) {
+// rev: that version's entry from /revisions ({content_type, size_bytes}); fetched
+// when absent (a deep link). A doc's type can change between versions, so each
+// version is shown as what it was, not as what the doc is now.
+async function viewRevision(id, version, total, el, rev = null) {
   const panel = $("#histpanel");
   panel.querySelectorAll(".lrow").forEach(x => x.classList.remove("active"));
   if (el) el.classList.add("active");
@@ -1077,15 +1170,23 @@ async function viewRevision(id, version, total, el) {
   try {
     const banner = `<div class="oldbanner">Viewing <strong>v${version}</strong> of ${total} `
       + `— <a id="backlatest">back to latest</a></div>`;
-    if (activeDoc && activeDoc.id === id && !isText(activeDoc.content_type)) {
-      bodyEl.innerHTML = banner + attachmentView(activeDoc, `/docs/${id}/revisions/${version}/raw${wsParam()}`);
+    if (!rev) {
+      const { revisions } = await (await api("/docs/" + id + "/revisions")).json();
+      rev = revisions.find(r => r.version === version) || null;
+    }
+    const ct = rev && rev.content_type !== undefined ? rev.content_type : (activeDoc && activeDoc.content_type);
+    if (!isText(ct)) {
+      lastRaw = null;
+      const meta = { ...(activeDoc || { slug: String(id) }), content_type: ct, size_bytes: rev ? rev.size_bytes : (activeDoc && activeDoc.size_bytes) };
+      bodyEl.innerHTML = banner + attachmentView(meta, `/docs/${id}/revisions/${version}/raw${wsParam()}`);
+      hydrateFiles(bodyEl);
       $("#backlatest").onclick = () => openDoc(id);
       return;
     }
     const raw = await (await api(`/docs/${id}/revisions/${version}/raw`)).text();
     lastRaw = raw; // the toggle re-renders whatever version is on screen
     bodyEl.innerHTML = banner + renderDoc(raw);
-    hydrateImages(bodyEl);
+    hydrateFiles(bodyEl);
     $("#backlatest").onclick = () => openDoc(id);
   } catch (e) { bodyEl.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
 }
@@ -1437,7 +1538,7 @@ function toggleRawView(id) {
   if (!bodyEl) return;
   const banner = bodyEl.querySelector(".oldbanner");
   bodyEl.innerHTML = (banner ? banner.outerHTML : "") + renderDoc(lastRaw);
-  hydrateImages(bodyEl);
+  hydrateFiles(bodyEl);
   const back = $("#backlatest");
   if (back) back.onclick = () => openDoc(id);
 }
@@ -1519,6 +1620,13 @@ async function writeClipboard(text, html) {
 }
 
 marked.setOptions({ gfm: true, breaks: false });
+// Same-origin images in markdown never load bare: their source moves to
+// data-file so hydrateFiles fetches them with the UI's headers. A bare <img>
+// would send no token or actor, and on gated servers fail before we could swap it.
+DOMPurify.addHook("afterSanitizeAttributes", n => {
+  const src = n.tagName === "IMG" ? n.getAttribute("src") : null;
+  if (src && sameOriginFile(src)) { n.setAttribute("data-file", withWorkspace(src)); n.removeAttribute("src"); }
+});
 // Start by loading workspaces, then let the URL route open the target item.
 (async () => {
   await loadWorkspaces();
