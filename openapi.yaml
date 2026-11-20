@@ -75,6 +75,12 @@ components:
         The workspace actually used is echoed back in the X-Workspace response
         header.
   schemas:
+    DocumentWriteResponse:
+      type: object
+      required: [document]
+      properties:
+        document: { $ref: '#/components/schemas/Document' }
+        embed: { type: string, description: "Markdown reference included for non-text files" }
     Document:
       type: object
       properties:
@@ -228,7 +234,7 @@ paths:
                 content_base64: { type: string, format: byte, description: "optional; seeds version 1 with any file (image, PDF). Mutually exclusive with content" }
                 content_type: { type: string, default: text/markdown, description: "for content_base64, defaults from the slug's extension" }
       responses:
-        "201": { description: created, content: { application/json: { schema: { type: object, properties: { document: { $ref: '#/components/schemas/Document' } } } } } }
+        "201": { description: created, content: { application/json: { schema: { $ref: '#/components/schemas/DocumentWriteResponse' } } } }
         "400": { $ref: '#/components/responses/BadRequest' }
 
   /tags:
@@ -267,9 +273,14 @@ paths:
         - { $ref: '#/components/parameters/Actor' }
         - { name: X-Lease-Token, in: header, required: true, schema: { type: string } }
         - { name: If-Match, in: header, required: true, schema: { type: integer }, description: "the base version (optimistic CAS)" }
-      requestBody: { required: true, content: { "text/markdown": { schema: { type: string } } } }
+      requestBody:
+        required: true
+        description: Raw document bytes. Set Content-Type to the file's media type.
+        content:
+          text/markdown: { schema: { type: string } }
+          "*/*": { schema: { type: string, format: binary } }
       responses:
-        "200": { description: written, content: { application/json: { schema: { type: object, properties: { document: { $ref: '#/components/schemas/Document' } } } } } }
+        "200": { description: written, content: { application/json: { schema: { $ref: '#/components/schemas/DocumentWriteResponse' } } } }
         "412": { description: "version_conflict", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
         "423": { description: "no_lease (you don't hold the lease)", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
     patch:
@@ -458,7 +469,7 @@ paths:
                 content_type: { type: string, default: text/markdown, description: "for content_base64, defaults from the filename's extension" }
                 metadata: { type: object, additionalProperties: true }
       responses:
-        "201": { description: created, content: { application/json: { schema: { type: object, properties: { document: { $ref: '#/components/schemas/Document' } } } } } }
+        "201": { description: created, content: { application/json: { schema: { $ref: '#/components/schemas/DocumentWriteResponse' } } } }
 
   /folios/{slug}/files/{filename}:
     parameters:

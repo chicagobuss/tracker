@@ -76,8 +76,8 @@ Every mutating request requires `X-Actor: <name>` (missing → `400`).
 - **Create:** `POST /docs` (`{slug, title, kind, tags, metadata, content,
   content_type}`); `content` seeds version 1. For a file (image, PDF, …) send
   `content_base64` instead; `content_type` then defaults from the slug's
-  extension, and the response includes `embed`: markdown that shows it
-  (`![name](/docs/<slug>/raw?workspace=<ws>)` for images, a link otherwise).
+  extension. For non-text files the response includes Markdown in `embed`,
+  such as `![name](/docs/<id>/raw?workspace=<ws>)` for an image.
 - **Relabel (no content write, no lease, no version bump):** `PATCH /docs/{id}`
   (`{add_tags, remove_tags, tags, metadata, title, kind}`). Strict JSON — sending
   `content` fails with `400`.

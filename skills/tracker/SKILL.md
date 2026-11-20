@@ -29,7 +29,7 @@ changes are attributed by entity. The full API reference is `GET
 
 ## Core concepts
 
-- **document** — one markdown file: slug, content, version, attribution.
+- **document** — versioned text or a file attachment, identified by slug and attributed to an actor.
 - **folio** — a little collection of related documents (what a gist was). A
   folio is itself a `kind=folio` doc whose metadata holds its description; its
   files are docs tagged `folio:<slug>`.
@@ -99,6 +99,8 @@ it needs instead of linking to docs that will not resolve.
      another agent holds the lease it fails clearly without writing; retry later.
    - `create_doc(slug, title, content)` — new doc;
      `add_folio_file(slug, filename, content)` — new doc inside a folio.
+     For any of these three writes, pass `content_base64` in place of `content`
+     to upload a file.
    - `create_folio(slug, description)` — new collection.
    - `retag_doc(id, add_tags=, remove_tags=, tags=, metadata=, title=, kind=)` —
      change tags/metadata/title/kind WITHOUT rewriting content (no lease, version

@@ -111,7 +111,6 @@ func embedMarkdown(doc *Document, workspace string) string {
 	return "[" + label + "](" + rawURL(doc, workspace) + ")"
 }
 
-// withEmbed adds an attachment's embed snippet to a write response.
 func withEmbed(resp map[string]any, doc *Document, workspace string) map[string]any {
 	if doc.ContentKey != "" && !isTextType(doc.ContentType) {
 		resp["embed"] = embedMarkdown(doc, workspace)

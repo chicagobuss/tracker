@@ -69,13 +69,13 @@ knobs live in `.env`:
 - **Attachments.** Any file can be a document: images, PDFs, archives. Upload
   in one call with `content_base64` (MCP `create_doc` / `add_folio_file` /
   `update_doc`, or REST `POST /docs` / `POST /folios/{slug}/files`); the type
-  defaults from the filename. Every upload returns an `embed` (markdown to
-  paste into another doc), images render inline in the UI, PDFs get a viewer,
-  and anything else a download card. In the UI, **📎 Attach**, drag-and-drop or
-  pasting a screenshot uploads into the open doc's folio. Text is indexed for
-  search; other files are found by title. `get_doc` never inlines binary bytes
-  (it returns `content_url` and the embed). `get_raw` returns base64 for files
-  up to 8 MiB. Fetch `content_url` for larger files.
+  defaults from the filename. Non-text uploads return an `embed` with Markdown
+  to paste into another document. Images and PDFs have inline previews.
+  Use **📎 Attach**, drop files, or paste a screenshot to upload to the current
+  folio. With no folio open, files go into **Attachments**. Search matches
+  text documents by title or content and attachments by title. For attachments,
+  `get_doc` returns `content_url` and `embed`. Use `get_raw` for base64 up to
+  8 MiB or fetch `content_url` for larger files.
   Served HTML, SVG and XML are sandboxed so an upload can't run as the site.
 - **Two-layer write safety (leases + CAS).** A `PUT` write requires both (a) a
   live TTL'd `doc_locks` lease (`X-Lease-Token`) and (b) `If-Match: <version>`
