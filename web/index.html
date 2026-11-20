@@ -509,16 +509,13 @@ const encSlug = s => String(s).split("/").map(encodeURIComponent).join("/");
 const decSlug = s => String(s).split("/").map(decodeURIComponent).join("/");
 
 // Attachments: anything that isn't text is stored byte for byte and shown as an
-// image, a PDF or a download card. Mirrors isTextType on the server, except that
-// images (SVG included) are always images here, never text to render.
-const TEXT_TYPE = /^(text\/|application\/(json|xml|yaml|x-yaml|toml|javascript|x-ndjson|sql)\b)|\+(json|xml|yaml)\b/;
-const isImage = ct => /^image\//.test(ct || "");
-const isText = ct => !ct || (!isImage(ct) && TEXT_TYPE.test(ct));
-// Types a browser runs as a page. They are shown only through <img> (which never
-// runs script) or downloaded: a blob: URL would run them as this origin, outside
-// the sandbox the server puts on them.
-const ACTIVE_TYPE = /^(text\/html|application\/xhtml\+xml|image\/svg\+xml)\b|[\/+]xml\b/;
-const isActive = ct => ACTIVE_TYPE.test(ct || "");
+// image, a PDF or a download card. Mirrors isTextType on the server.
+const mediaType = ct => (ct || "").split(";")[0].trim().toLowerCase();
+const isImage = ct => mediaType(ct).startsWith("image/");
+const isText = ct => !ct || (!isImage(ct) && /^(text\/|application\/(json|xml|yaml|x-yaml|toml|javascript|x-ndjson|sql)$)|\+(json|xml|yaml)$/.test(mediaType(ct)));
+// Only these formats may open as a page or use a same-origin blob preview.
+const rasterTypes = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "image/avif", "image/bmp", "image/x-icon", "image/vnd.microsoft.icon", "image/apng"]);
+const canOpenFile = ct => mediaType(ct) === "application/pdf" || rasterTypes.has(mediaType(ct));
 const fileIcon = ct => isText(ct) ? "📄" : isImage(ct) ? "🖼" : "📎";
 const wsParam = () => { const ws = headers()["X-Workspace"]; return ws ? "?workspace=" + encodeURIComponent(ws) : ""; };
 // By UUID, like the server's embeds: survives renames and needs no slug escaping.
@@ -539,7 +536,7 @@ function embedFor(d) {
 // the URLs are revoked when the view changes.
 let fileCache = new Map();
 function releaseFiles() {
-  for (const p of fileCache.values()) p.then(f => f && URL.revokeObjectURL(f.url), () => {});
+  for (const p of fileCache.values()) p.then(f => f.url && URL.revokeObjectURL(f.url), () => {});
   fileCache = new Map();
 }
 // The server honours X-Workspace over ?workspace=, so a URL that names its
@@ -550,13 +547,15 @@ function fileHeaders(src) {
   if (ws) h["X-Workspace"] = ws;
   return h;
 }
-function fetchFile(src) {
+async function fetchFile(src) {
+  if (!sameOriginFile(src)) throw new Error("Expected a local Tracker file URL");
   if (!fileCache.has(src)) {
     fileCache.set(src, (async () => {
-      const r = await fetch(src, { headers: fileHeaders(src) });
+      const r = await fetch(src, { headers: fileHeaders(src), mode: "same-origin", redirect: "error" });
       if (!r.ok) throw new Error("HTTP " + r.status);
       const blob = await r.blob();
-      return { blob, type: (r.headers.get("Content-Type") || blob.type || "").split(";")[0].trim(), url: URL.createObjectURL(blob) };
+      const type = mediaType(blob.type);
+      return { blob, type, url: canOpenFile(type) ? URL.createObjectURL(blob) : null };
     })());
   }
   return fileCache.get(src);
@@ -567,7 +566,7 @@ async function downloadFile(src, name) {
   // A name taken from link text may lack an extension; take it from the type.
   if (!/\.[a-z0-9]{1,8}$/i.test(name) && f.type.includes("/"))
     name += "." + f.type.split("/")[1].split("+")[0].replace("jpeg", "jpg").replace("plain", "txt");
-  const blob = isActive(f.type) ? new Blob([f.blob], { type: "application/octet-stream" }) : f.blob;
+  const blob = f.blob.slice(0, f.blob.size, "application/octet-stream");
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
   a.download = name;
@@ -581,7 +580,7 @@ async function openFile(src, name) {
   const tab = window.open("", "_blank");
   try {
     const f = await fetchFile(src);
-    if (isActive(f.type)) { if (tab) tab.close(); return downloadFile(src, name); }
+    if (!f.url) { if (tab) tab.close(); return downloadFile(src, name); }
     if (tab) { tab.opener = null; tab.location = f.url; }
   } catch (e) { if (tab) tab.close(); notify(`Couldn't open ${esc(name)}: ${esc(e.message)}`); }
 }
@@ -591,29 +590,41 @@ function attachmentView(d, src = rawSrc(d)) {
   const name = d.slug.split("/").pop();
   const ct = d.content_type || "";
   const empty = !d.size_bytes;
-  const canOpen = !empty && (isImage(ct) && !isActive(ct) || ct === "application/pdf");
+  const canOpen = !empty && canOpenFile(ct);
   const card = `<div class="filecard"><span class="icon">${fileIcon(ct)}</span>
       <div><strong>${esc(name)}</strong><div class="muted">${esc(ct || "unknown type")} · ${empty ? "empty file" : human(d.size_bytes)}</div></div>
       ${canOpen ? `<a href="#" data-open="${esc(src)}" data-name="${esc(name)}">open</a>` : ""}
-      ${empty ? "" : `<a href="#" data-download="${esc(src)}" data-name="${esc(name)}">download</a>`}</div>`;
+      <a href="#" data-download="${esc(src)}" data-name="${esc(name)}">download</a></div>`;
   if (empty) return card;
   if (isImage(ct)) return `<figure class="attachment"><img data-file="${esc(src)}" alt="${esc(d.title || name)}"></figure>${card}`;
-  if (ct === "application/pdf") return `<div class="attachment"><iframe data-file="${esc(src)}" title="${esc(name)}"></iframe></div>${card}`;
+  if (mediaType(ct) === "application/pdf") return `<div class="attachment"><iframe data-file="${esc(src)}" title="${esc(name)}"></iframe></div>${card}`;
   return card;
 }
 
 // Wire up a rendered view: attachment previews and card links, plus same-origin
 // images and file links inside rendered markdown (sent to the workspace being
 // viewed, and fetched with the UI's headers like everything else).
-const sameOriginFile = u => /^\/(docs|blobs)\//.test(u || "");
+function sameOriginFile(src) {
+  if (!/^\/(docs|blobs)\//.test(src || "")) return false;
+  const url = new URL(src, location.origin);
+  return url.origin === location.origin && /^\/(docs|blobs)\//.test(url.pathname);
+}
 function withWorkspace(u) {
   if (!u.startsWith("/docs/") || /[?&]workspace=/.test(u) || !wsParam()) return u;
   return u + (u.includes("?") ? "&" : "?") + wsParam().slice(1);
 }
 function hydrateFiles(root) {
   if (!root) return;
-  root.querySelectorAll("[data-file]").forEach(async el => {
-    try { el.src = (await fetchFile(el.dataset.file)).url; }
+  root.querySelectorAll("img[data-file], iframe[data-file]").forEach(async el => {
+    try {
+      const f = await fetchFile(el.dataset.file);
+      if (el.tagName === "IFRAME" && f.type === "application/pdf") el.src = f.url;
+      else if (el.tagName === "IMG" && rasterTypes.has(f.type)) el.src = f.url;
+      else if (el.tagName === "IMG" && isImage(f.type)) {
+        // An SVG viewed separately must never inherit the application's origin.
+        el.src = "data:" + f.type + ";base64," + await fileToBase64(f.blob);
+      } else throw new Error("Unexpected preview type");
+    }
     catch (e) {
       if (el.tagName === "IMG") el.alt = (el.alt || "image") + " (couldn't load: " + e.message + ")";
       else el.replaceWith(Object.assign(document.createElement("div"), { className: "empty", textContent: "Couldn't load file: " + e.message }));
@@ -1522,7 +1533,7 @@ let lastRaw = null; // the raw text currently on screen (latest or a revision)
 function renderDoc(raw) {
   return rawView
     ? `<pre class="rawview">${esc(raw)}</pre>`
-    : `<div class="md">${DOMPurify.sanitize(marked.parse(raw))}</div>`;
+    : `<div class="md">${DOMPurify.sanitize(marked.parse(raw), { ALLOW_DATA_ATTR: false })}</div>`;
 }
 function toggleRawView(id) {
   rawView = !rawView;
