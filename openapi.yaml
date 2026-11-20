@@ -224,8 +224,9 @@ paths:
                 kind: { type: string, default: note }
                 tags: { type: array, items: { type: string } }
                 metadata: { type: object, additionalProperties: true }
-                content: { type: string, description: "optional; seeds version 1" }
-                content_type: { type: string, default: text/markdown }
+                content: { type: string, description: "optional; seeds version 1 with text" }
+                content_base64: { type: string, format: byte, description: "optional; seeds version 1 with any file (image, PDF). Mutually exclusive with content" }
+                content_type: { type: string, default: text/markdown, description: "for content_base64, defaults from the slug's extension" }
       responses:
         "201": { description: created, content: { application/json: { schema: { type: object, properties: { document: { $ref: '#/components/schemas/Document' } } } } } }
         "400": { $ref: '#/components/responses/BadRequest' }
@@ -453,7 +454,8 @@ paths:
                     `metadata` are not searchable — only real tags are matched
                     by the `tag` filter on GET /docs.
                 content: { type: string }
-                content_type: { type: string, default: text/markdown }
+                content_base64: { type: string, format: byte, description: "any file (image, PDF); mutually exclusive with content" }
+                content_type: { type: string, default: text/markdown, description: "for content_base64, defaults from the filename's extension" }
                 metadata: { type: object, additionalProperties: true }
       responses:
         "201": { description: created, content: { application/json: { schema: { type: object, properties: { document: { $ref: '#/components/schemas/Document' } } } } } }
