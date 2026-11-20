@@ -109,7 +109,8 @@ with `POST /folios/{slug}/files` (`{filename, title, kind, tags, content,
 content_base64, content_type, metadata}`). Attachments (non-text files) are
 listed with their `content_type`; text is indexed for search, files by title.
 Over MCP, `get_doc` returns an attachment's `content_url` and `embed` instead of
-its bytes; `get_raw` returns `content_base64`. Deleting a non-empty folio (soft or hard) returns
+its bytes. `get_raw` returns `content_base64` for files up to 8 MiB. Fetch
+`content_url` for larger files. Deleting a non-empty folio (soft or hard) returns
 `409 folio_not_empty` unless `cascade=true`.
 
 ## Work queue

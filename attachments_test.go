@@ -27,6 +27,7 @@ func TestSearchText(t *testing.T) {
 		{"application/vnd.api+json", `{}`, `{}`},
 		{"", "plain", "plain"},
 		{"image/png", string(pngBytes), ""},
+		{"image/svg+xml", "<svg/>", ""},
 		{"application/pdf", "%PDF-1.7", ""},
 		{"text/plain", "\x89bad", ""},
 	} {
@@ -104,17 +105,18 @@ func TestAttachmentHTTP(t *testing.T) {
 	}
 
 	// REST upload: type comes from the filename, the response carries an embed.
-	out := post("/folios/pics/files", map[string]any{"filename": "dot.png", "content_base64": base64.StdEncoding.EncodeToString(pngBytes)})
+	out := post("/folios/pics/files", map[string]any{"filename": "red dot#2(1).png", "content_base64": base64.StdEncoding.EncodeToString(pngBytes)})
 	doc := out["document"].(map[string]any)
 	if doc["content_type"] != "image/png" {
 		t.Errorf("content_type = %v, want image/png", doc["content_type"])
 	}
-	if out["embed"] != "![dot.png](/docs/pics/dot.png/raw?workspace=default)" {
+	rawPath := "/docs/" + doc["id"].(string) + "/raw?workspace=default"
+	if out["embed"] != "![red dot#2(1).png]("+rawPath+")" {
 		t.Errorf("embed = %v", out["embed"])
 	}
 
 	// The raw route serves the exact bytes, typed and unsniffable.
-	resp, err := http.Get(ts.URL + "/docs/pics/dot.png/raw")
+	resp, err := http.Get(ts.URL + rawPath)
 	if err != nil {
 		t.Fatalf("raw: %v", err)
 	}
@@ -128,7 +130,10 @@ func TestAttachmentHTTP(t *testing.T) {
 	}
 
 	// Uploaded SVG could run script with this origin's access; it is sandboxed.
-	post("/folios/pics/files", map[string]any{"filename": "x.svg", "content_base64": base64.StdEncoding.EncodeToString([]byte(`<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>`))})
+	svg := post("/folios/pics/files", map[string]any{"filename": "x.svg", "content_base64": base64.StdEncoding.EncodeToString([]byte(`<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>`))})
+	if embed, _ := svg["embed"].(string); !strings.HasPrefix(embed, "![x.svg](") {
+		t.Fatalf("missing SVG embed: %v", svg)
+	}
 	resp, err = http.Get(ts.URL + "/docs/pics/x.svg/raw")
 	if err != nil {
 		t.Fatalf("raw svg: %v", err)
@@ -136,6 +141,28 @@ func TestAttachmentHTTP(t *testing.T) {
 	resp.Body.Close()
 	if resp.Header.Get("Content-Security-Policy") != "sandbox" {
 		t.Errorf("svg CSP = %q, want sandbox", resp.Header.Get("Content-Security-Policy"))
+	}
+
+	// Legacy text clients send content:"" when creating an unseeded document.
+	stub := post("/folios/pics/files", map[string]any{"filename": "stub.md", "content": ""})
+	if d := stub["document"].(map[string]any); d["version"] != float64(0) {
+		t.Fatalf("empty text seeded a version: %v", stub)
+	}
+
+	// An explicitly empty base64 file still has downloadable content.
+	empty := post("/folios/pics/files", map[string]any{"filename": "empty.zip", "content_base64": ""})
+	file := empty["document"].(map[string]any)
+	if file["version"] != float64(1) || file["size_bytes"] != float64(0) || empty["embed"] == nil {
+		t.Fatalf("zero-byte upload: %v", empty)
+	}
+	resp, err = http.Get(ts.URL + "/docs/" + file["id"].(string) + "/raw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil || resp.StatusCode != http.StatusOK || len(body) != 0 {
+		t.Fatalf("empty download: status=%d bytes=%d err=%v", resp.StatusCode, len(body), err)
 	}
 
 	// MCP: upload by base64, read back without flooding the caller.
@@ -166,5 +193,60 @@ func TestAttachmentHTTP(t *testing.T) {
 	}
 	if txt := call("get_doc", map[string]any{"id": "pics/note.md", "include_content": true}); txt["content"] != "text" || txt["embed"] != nil {
 		t.Errorf("text doc changed shape: %v", txt)
+	}
+}
+
+func TestUpdateDocRequiresExplicitContent(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	srv := &Server{store: s}
+	doc, err := s.CreateDocument(ctx, "report", "Report", "attachment", nil, nil, pngBytes, "image/png", "tester")
+	if err != nil {
+		t.Fatal(err)
+	}
+	update := mcpTools["update_doc"].fn
+	for _, args := range []targs{
+		{"id": doc.ID},
+		{"id": doc.ID, "content": nil},
+		{"id": doc.ID, "content_base64": 4},
+		{"id": doc.ID, "content": "", "content_base64": ""},
+	} {
+		if _, err := update(ctx, srv, "tester", args); err == nil {
+			t.Fatalf("update accepted %v", args)
+		}
+	}
+	if _, err := update(ctx, srv, "tester", targs{"id": doc.ID, "content_base64": "", "content_type": "application/pdf"}); err != nil {
+		t.Fatal(err)
+	}
+	history, err := s.DocRevisions(ctx, doc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 2 || history[0].ContentType != "application/pdf" || history[0].SizeBytes != 0 ||
+		history[1].ContentType != "image/png" || history[1].SizeBytes != int64(len(pngBytes)) {
+		t.Fatalf("unexpected revision history: %+v", history)
+	}
+	key, ct, err := s.RevisionContent(ctx, doc.ID, 1)
+	if err != nil || ct != "image/png" || key != doc.ContentKey {
+		t.Fatalf("original revision: key=%s type=%s err=%v", key, ct, err)
+	}
+}
+
+func TestRawAttachmentOverInlineLimit(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	srv := &Server{store: s}
+	doc, err := s.CreateDocument(ctx, "large.bin", "large", "attachment", nil, nil,
+		make([]byte, maxInlineContent+1), "application/octet-stream", "tester")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := mcpTools["get_raw"].fn(ctx, srv, "", targs{"id": doc.ID})
+	if err == nil || !strings.Contains(err.Error(), "content_url") || out != nil {
+		t.Fatalf("expected a download instruction without partial data: err=%v", err)
+	}
+	envelope, err := srv.docWithExtras(ctx, doc, true)
+	if err != nil || envelope["content_url"] == nil || envelope["content_omitted"] == nil {
+		t.Fatalf("missing download location: %v, %v", envelope, err)
 	}
 }

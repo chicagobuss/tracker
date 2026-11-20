@@ -396,8 +396,8 @@ func (s *Server) createDoc(w http.ResponseWriter, r *http.Request) {
 		Kind        string          `json:"kind"`
 		Tags        []string        `json:"tags"`
 		Metadata    json.RawMessage `json:"metadata"`
-		Content     string          `json:"content"`
-		ContentB64  string          `json:"content_base64"`
+		Content     *string         `json:"content"`
+		ContentB64  *string         `json:"content_base64"`
 		ContentType string          `json:"content_type"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Slug == "" {
@@ -409,10 +409,7 @@ func (s *Server) createDoc(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, err.Error())
 		return
 	}
-	ctype := in.ContentType
-	if in.ContentB64 != "" {
-		ctype = uploadType(ctype, in.Slug, content)
-	}
+	content, ctype := seedContent(content, in.ContentB64 != nil, in.ContentType, in.Slug)
 	doc, err := s.store.CreateDocument(r.Context(), in.Slug, in.Title, in.Kind, in.Tags, in.Metadata, content, ctype, actor)
 	if err != nil {
 		writeErr(w, err)
@@ -767,8 +764,8 @@ func (s *Server) createFolioFile(w http.ResponseWriter, r *http.Request) {
 		Title       string          `json:"title"`
 		Kind        string          `json:"kind"`
 		Tags        []string        `json:"tags"`
-		Content     string          `json:"content"`
-		ContentB64  string          `json:"content_base64"`
+		Content     *string         `json:"content"`
+		ContentB64  *string         `json:"content_base64"`
 		ContentType string          `json:"content_type"`
 		Metadata    json.RawMessage `json:"metadata"`
 	}
@@ -790,10 +787,7 @@ func (s *Server) createFolioFile(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, err.Error())
 		return
 	}
-	ctype := in.ContentType
-	if in.ContentB64 != "" {
-		ctype = uploadType(ctype, in.Filename, content)
-	}
+	content, ctype := seedContent(content, in.ContentB64 != nil, in.ContentType, in.Filename)
 	doc, err := s.store.CreateDocument(r.Context(), folio.Slug+"/"+in.Filename, title, kind,
 		folioTags(folio.Slug, in.Tags), meta, content, ctype, actor)
 	if err != nil {

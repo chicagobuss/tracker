@@ -21,6 +21,8 @@ func isTextType(contentType string) bool {
 		return contentType == ""
 	}
 	switch {
+	case strings.HasPrefix(mt, "image/"):
+		return false
 	case strings.HasPrefix(mt, "text/"),
 		strings.HasSuffix(mt, "+json"), strings.HasSuffix(mt, "+xml"), strings.HasSuffix(mt, "+yaml"):
 		return true
@@ -45,20 +47,32 @@ func searchText(contentType string, data []byte) string {
 
 // contentArgs reads a write's content from either `content` (text) or
 // `content_base64` (any bytes). A nil result means no content was given.
-func contentArgs(text, b64 string) ([]byte, error) {
+func contentArgs(text, b64 *string) ([]byte, error) {
 	switch {
-	case text != "" && b64 != "":
+	case text != nil && b64 != nil:
 		return nil, errors.New("pass content or content_base64, not both")
-	case b64 != "":
-		b, err := base64.StdEncoding.DecodeString(b64)
+	case b64 != nil:
+		b, err := base64.StdEncoding.DecodeString(*b64)
 		if err != nil {
 			return nil, fmt.Errorf("content_base64 is not valid base64: %w", err)
 		}
 		return b, nil
-	case text != "":
-		return []byte(text), nil
+	case text != nil:
+		return []byte(*text), nil
 	}
 	return nil, nil
+}
+
+// seedContent preserves the create API's unseeded version 0 for empty text.
+// Files have a distinct empty representation: an explicit zero-byte upload is v1.
+func seedContent(data []byte, encoded bool, given, name string) ([]byte, string) {
+	if encoded {
+		return data, uploadType(given, name, data)
+	}
+	if len(data) == 0 {
+		return nil, given
+	}
+	return data, given
 }
 
 // uploadType picks a content type for base64 uploads that didn't name one:
@@ -76,7 +90,7 @@ func uploadType(given, name string, data []byte) string {
 // rawURL is the same-origin path a doc's bytes are served from. It carries the
 // workspace because an <img> request can't send an X-Workspace header.
 func rawURL(doc *Document, workspace string) string {
-	u := "/docs/" + doc.Slug + "/raw"
+	u := "/docs/" + doc.ID + "/raw"
 	if workspace != "" {
 		u += "?workspace=" + url.QueryEscape(workspace)
 	}
@@ -90,7 +104,7 @@ func embedMarkdown(doc *Document, workspace string) string {
 	if label == "" {
 		label = path.Base(doc.Slug)
 	}
-	label = strings.NewReplacer("[", "(", "]", ")").Replace(label)
+	label = strings.NewReplacer(`\`, `\\`, "[", `\[`, "]", `\]`, "\r", " ", "\n", " ").Replace(label)
 	if strings.HasPrefix(doc.ContentType, "image/") {
 		return "![" + label + "](" + rawURL(doc, workspace) + ")"
 	}
